@@ -6,7 +6,7 @@ use serde_json::Value;
 */
 
 use error_chain::error_chain;
-use std::io::{copy, Seek, SeekFrom};
+use std::io::{BufReader, copy, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::fs::{self, File, OpenOptions};
 use std::process::{Command, Stdio};
@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
     socc_json_path.set_extension("json");
 
     let socc_json = fetch(socc_json_req, &socc_json_path).await?;
-    let socc_json: serde_json::Value = serde_json::from_reader(socc_json).unwrap();
+    let socc_json: serde_json::Value = serde_json::from_reader(BufReader::new(socc_json)).unwrap();
     let socc_json = socc_json.get("json_dump").unwrap();
 
 
@@ -80,6 +80,15 @@ async fn main() -> Result<()> {
         .unwrap();
     println!("analyzed!");
 
+    let mut rust_json_path = PathBuf::from(dump_dir).join(&socc_id);
+    rust_json_path.set_extension("rust.json");
+    let mut file =  OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&rust_json_path)?;
+
+    copy(&mut &*output.stdout, &mut file)?;
     let rust_json: serde_json::Value = serde_json::from_reader(&*output.stdout).unwrap();
 
     compare_crashes(rust_json.as_object().unwrap(), socc_json.as_object().unwrap());
@@ -96,8 +105,9 @@ fn compare_crashes(
     let rust_thread = rust_json.get(k).unwrap();
     let socc_thread = socc_json.get(k).unwrap();
 
-    let (errors, warnings) = recursive_compare(0, k, rust_thread, socc_thread);
-    let status = if errors == 0 { "✔" } else { "❌" };
+    println!("");
+    let (errors, warnings) = recursive_compare(0, k, socc_thread, rust_thread);
+    let status = if errors == 0 { "+" } else { "-" };
     println!("");
     println!("{} Total errors: {}, warnings: {}", status, errors, warnings);
 }
@@ -105,8 +115,8 @@ fn compare_crashes(
 fn recursive_compare(
     depth: usize,
     k: &str,
-    rust_val: &serde_json::Value, 
     socc_val: &serde_json::Value,
+    rust_val: &serde_json::Value, 
 ) -> (u64, u64) {
     use serde_json::Value::*;
 
@@ -116,42 +126,42 @@ fn recursive_compare(
     match (socc_val, rust_val) {
         (Bool(s), Bool(r)) => {
             if s == r {
-                println!("{:width$}✔ {}: {}", "", k, s, width=depth);
+                println!(" {:width$}{}: {}", "", k, s, width=depth);
             } else {
                 errors += 1;
-                println!("{:width$}❌", "", width=depth);
-                println!("  {:width$}{}: {}", "", k, s, width=depth);
-                println!("  {:width$}{}: {}", "", k, r, width=depth);
+                println!("-{:width$}did not match", "", width=depth);
+                println!("+{:width$}{}: {}", "", k, s, width=depth);
+                println!("-{:width$}{}: {}", "", k, r, width=depth);
             }
         }
         (Number(s), Number(r)) => {
             if s == r {
-                println!("{:width$}✔ {}: {}", "", k, s, width=depth);
+                println!(" {:width$}{}: {}", "", k, s, width=depth);
             } else {
                 errors += 1;
-                println!("{:width$}❌ did not match", "", width=depth);
-                println!("  {:width$}{}: {}", "", k, s, width=depth);
-                println!("  {:width$}{}: {}", "", k, r, width=depth);
+                println!("-{:width$}did not match", "", width=depth);
+                println!("+{:width$}{}: {}", "", k, s, width=depth);
+                println!("-{:width$}{}: {}", "", k, r, width=depth);
             }
         }
         (String(s), String(r)) => {
             if let (Some(s), Some(r)) = (parse_int(s), parse_int(r)) {
                 if s == r {
-                    println!("{:width$}✔ {}: 0x{:08x}", "", k, s, width=depth);
+                    println!(" {:width$}{}: 0x{:08x}", "", k, s, width=depth);
                 } else {
                     errors += 1;
-                    println!("{:width$}❌ did not match", "", width=depth);
-                    println!("  {:width$}{}: 0x{:08x}", "", k, s, width=depth);
-                    println!("  {:width$}{}: 0x{:08x}", "", k, r, width=depth);
+                    println!("-{:width$}did not match", "", width=depth);
+                    println!("+{:width$}{}: 0x{:08x}", "", k, s, width=depth);
+                    println!("-{:width$}{}: 0x{:08x}", "", k, r, width=depth);
                 }
             } else {
                 if s == r {
-                    println!("{:width$}✔ {}: {}", "", k, s, width=depth);
+                    println!(" {:width$}{}: {}", "", k, s, width=depth);
                 } else {
                     errors += 1;
-                    println!("{:width$}❌ did not match", "", width=depth);
-                    println!("  {:width$}{}: {}", "", k, s, width=depth);
-                    println!("  {:width$}{}: {}", "", k, r, width=depth);
+                    println!("-{:width$}did not match", "", width=depth);
+                    println!("+{:width$}{}: {}", "", k, s, width=depth);
+                    println!("-{:width$}{}: {}", "", k, r, width=depth);
                 }
             }
         }
@@ -169,10 +179,11 @@ fn recursive_compare(
                         // Ok to be missing a null
                     } else if useless_fields.contains(&&**k) {
                         warnings += 1;
-                        println!("{:width$}⚠ ignoring useless field {}: {}", "", k, s, width=new_depth);
+                        println!("~{:width$}ignoring useless field {}: {}", "", k, s, width=new_depth);
                     } else {
                         errors += 1;
-                        println!("{:width$}❌ rust was missing {}: {}", "", k, s, width=new_depth);
+                        println!("-{:width$}rust was missing", "", width=new_depth);
+                        println!("+{:width$}{}: {}", "", k, s, width=new_depth);
                     }
                 }
             }
@@ -182,26 +193,78 @@ fn recursive_compare(
             let s_len = s.len();
             let r_len = r.len();
             let len = if s_len < r_len { s_len } else { r_len };
-            if s_len != r_len {
-                println!("{:width$}❌ different length", "", width=depth);
-                errors += 1;
-            }
+            
             println!("{:width$} {}: [", "", k, width=depth);
+            let new_depth = depth + 2;
             for i in 0..len {
-                let (new_errors, new_warnings) = recursive_compare(depth + 2, &i.to_string(), &s[i], &r[i]);
+                let (new_errors, new_warnings) = recursive_compare(new_depth, &i.to_string(), &s[i], &r[i]);
                 errors += new_errors;
                 warnings += new_warnings;
+            }
+
+            // Display non-paired values
+            for i in len..s_len {
+                errors += 1;
+                println!("-{:width$}rust was missing array value:", "", width=new_depth);
+                recursive_print(new_depth, &i.to_string(), &s[i]);
+            }
+            for i in len..r_len {
+                errors += 1;
+                println!("-{:width$}rust had extra array value:", "", width=new_depth);
+                recursive_print(new_depth, &i.to_string(), &r[i]);
             }
             println!(" {:width$}]", "", width=depth);
         }
         (_, Null) => {
-            println!("{:width$}❌ rust val was null instead of {}: {}", "", k, socc_val, width=depth);
+            println!("-{:width$}rust val was null instead of:", "", width=depth);
+            recursive_print(depth, k, socc_val);
         }
         _ => {
-            println!("{:width$}❌ completely different types for {}", "", k, width=depth);
+            println!("-{:width$}completely different types for {}:", "", k, width=depth);
+            println!("+");
+            recursive_print(depth+2, k, socc_val);
+            println!("-");
+            recursive_print(depth+2, k, rust_val);
         }
     }
     (errors, warnings)
+}
+
+fn recursive_print(
+    depth: usize,
+    k: &str,
+    val: &serde_json::Value
+) {
+    use serde_json::Value::*;
+
+    match val {
+        Bool(val) => {
+            println!("{:width$} {}: {}", "", k, val, width=depth);
+        }
+        Number(val) => {
+            println!("{:width$} {}: {}", "", k, val, width=depth);
+        }
+        String(val) => {
+            println!("{:width$} {}: {}", "", k, val, width=depth);
+        }
+        Object(val) => {
+             println!("{:width$} {}: {{", "", k, width=depth);
+            for (k, v) in val {
+                recursive_print(depth+2, k, v);
+            }
+            println!("{:width$} }}", "", width=depth);
+        }
+        Array(val) => {
+            println!("{:width$} {}: [", "", k, width=depth);
+            for i in 0..val.len() {
+                recursive_print(depth+2, &i.to_string(), &val[i]);
+            }
+            println!("{:width$} ]", "", width=depth);
+        }
+        Null => {
+            println!("{:width$} {}: null", "", k, width=depth);
+        }
+    }
 }
 
 async fn fetch(request: reqwest::RequestBuilder, path: &Path) -> Result<File> {
