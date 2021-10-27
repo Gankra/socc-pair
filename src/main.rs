@@ -21,7 +21,7 @@ error_chain! {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let matches = App::new("minidump_stackwalk")
+    let matches = App::new("socc-pair")
         .version(crate_version!())
         .about("Compares two minidump-stackwalk json outputs (usually socorro vs local)")
         .setting(AppSettings::NextLineHelp)
