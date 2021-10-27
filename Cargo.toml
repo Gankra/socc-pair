@@ -11,3 +11,6 @@ serde_json = "*"
 tempfile = "*"
 error-chain = "*"
 tokio =  { version = "*", features = ["full"] }
+simplelog = "0.10.2"
+clap = "2.33"
+log = "0.4"
