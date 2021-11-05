@@ -440,6 +440,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
 
     let _ = command
         .arg(&minidump)
+        .arg("--verbose=trace")
         .stdout(Stdio::piped())
         .output()
         .unwrap();
