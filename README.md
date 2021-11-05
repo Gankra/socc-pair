@@ -90,5 +90,96 @@ Output Files:
 
 
 
+## Debugging Backtraces
+
+socc-pair will capture and store the logging output of rust-minidump (see the "Local minidump-stackwalk Logs" path at the end of the above example). socc-pair also configures
+rust-minidump to use `trace` logging, which includes a detailed trace of how it
+performed each stackwalk.
+
+Some tips on reading these logs:
+
+* All unwinding lines will start with `[TRACE] unwind` (other logs may get interspersed).
+* Each thread's unwind will: 
+  * start with "starting stack unwind" 
+  * end with "finished stack unwind"
+* Each frame's unwind will: 
+  * start with "unwinding \<name\>"
+  * end with "\<unwinding method\> seems valid"
+  * include the final instruction pointer and stack pointer values at the end
+* The methods used to unwind are tried in order (decreasing in quality)
+  * cfi
+  * frame pointer
+  * scan
 
 
+If you see "trying scan" or "trying framepointer", this means the previous
+unwinding method failed. Sometimes the reason for failure will be logged, 
+but other times the failure is in a weird place I don't have any logging for.
+If that happens, you can still potentially infer what went wrong based on what
+usually comes after that step.
+
+For instance, a cfi trace typically looks like:
+
+```text
+[TRACE] unwind: unwinding NtGetContextThread
+[TRACE] unwind: trying cfi
+[TRACE] unwind: found symbols for address, searching for cfi entries
+```
+
+If you instead see:
+
+```text
+[TRACE] unwind: unwinding NtGetContextThread
+[TRACE] unwind: trying cfi
+[TRACE] unwind: trying frame pointer
+```
+
+This suggests the cfi analysis couldn't *even* get to "found symbols for address". So,
+presumably, it *couldn't* find symbols for the current instruction pointer. This may 
+be because it didn't map to a known module, or because there were no symbols for that module.
+
+
+
+
+### Example Trace
+
+```text
+[TRACE] unwind: starting stack unwind
+[TRACE] unwind: unwinding NtGetContextThread
+[TRACE] unwind: trying cfi
+[TRACE] unwind: found symbols for address, searching for cfi entries
+[TRACE] unwind: trying STACK CFI exprs
+[TRACE] unwind:   .cfa: $rsp 8 + .ra: .cfa 8 - ^
+[TRACE] unwind:   .cfa: $rsp 8 +
+[TRACE] unwind: STACK CFI parse successful
+[TRACE] unwind: STACK CFI seems reasonable, evaluating
+[TRACE] unwind: successfully evaluated .cfa (frame address)
+[TRACE] unwind: successfully evaluated .ra (return address)
+[TRACE] unwind: cfi evaluation was successful -- caller_ip: 0x000000ec00000000, caller_sp: 0x000000ec7fbfd790
+[TRACE] unwind: cfi result seems valid
+[TRACE] unwind: unwinding 1013612281855
+[TRACE] unwind: trying cfi
+[TRACE] unwind: trying frame pointer
+[TRACE] unwind: trying scan
+[TRACE] unwind: scan seems valid -- caller_ip: 0x7ffd172c2a24, caller_sp: 0xec7fbfd7f8
+[TRACE] unwind: unwinding <unknown in ntdll.dll>
+[TRACE] unwind: trying cfi
+[TRACE] unwind: found symbols for address, searching for cfi entries
+[TRACE] unwind: trying frame pointer
+[TRACE] unwind: trying scan
+[TRACE] unwind: scan seems valid -- caller_ip: 0x7ffd162b7034, caller_sp: 0xec7fbfd828
+[TRACE] unwind: unwinding BaseThreadInitThunk
+[TRACE] unwind: trying cfi
+[TRACE] unwind: found symbols for address, searching for cfi entries
+[TRACE] unwind: trying STACK CFI exprs
+[TRACE] unwind:   .cfa: $rsp 8 + .ra: .cfa 8 - ^
+[TRACE] unwind:   .cfa: $rsp 48 +
+[TRACE] unwind: STACK CFI parse successful
+[TRACE] unwind: STACK CFI seems reasonable, evaluating
+[TRACE] unwind: successfully evaluated .cfa (frame address)
+[TRACE] unwind: successfully evaluated .ra (return address)
+[TRACE] unwind: cfi evaluation was successful -- caller_ip: 0x0000000000000000, caller_sp: 0x000000ec7fbfd858
+[TRACE] unwind: cfi result seems valid
+[TRACE] unwind: instruction pointer was nullish, assuming unwind complete
+[TRACE] unwind: finished stack unwind
+```
