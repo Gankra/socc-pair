@@ -23,7 +23,13 @@ You will need a socorro [API key](https://crash-stats.mozilla.org/api/tokens/) w
 
 If you don't wish to use the second permission, you can set `--raw-json=none` to skip the raw json.
 
-Note that this assumes you have rust-minidump's `minidump-stackwalk` binary installed on your path (cd into that subcrate and `cargo install --path ./`)
+Note that this assumes you have rust-minidump's `minidump-stackwalk` binary installed on your path (`cargo install minidump-stackwalk`)
+
+If you would like to use a local checkout of minidump-stackwalk, use the argument:
+
+```
+--run-local=path/to/rust-minidump/minidump-stackwalk
+```
 
 ## Example Execution
 
