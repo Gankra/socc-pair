@@ -2,12 +2,11 @@ use error_chain::error_chain;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{copy, BufReader, Seek, SeekFrom};
+use std::io::{copy, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clap::{crate_version, App, AppSettings, Arg};
-use log::error;
 use simplelog::{
     ColorChoice, ConfigBuilder, Level, LevelFilter, TermLogger, TerminalMode, WriteLogger,
 };
@@ -191,6 +190,18 @@ you, don't worry about it, you're probably not doing something that will run afo
                 .help("Where to write logs to (if unspecified, stderr is used)"),
         )
         .arg(
+            Arg::with_name("run-local")
+                .long("run-local")
+                .takes_value(true)
+                .long_help(
+                    "A path to a local rust-minidump/minidump-stackwalk checkout to build and run
+
+`cargo run --release -- <args>` will be invoked in the given directory.
+
+",
+                ),
+        )
+        .arg(
             Arg::with_name("api-token")
                 .long("api-token")
                 .takes_value(true)
@@ -233,6 +244,10 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
         .value_of_os("log-file")
         .map(|os_str| Path::new(os_str).to_owned());
 
+    let local_checkout = matches
+        .value_of_os("run-local")
+        .map(|os_str| Path::new(os_str).to_owned());
+
     let verbosity = match matches.value_of("verbose").unwrap() {
         "off" => LevelFilter::Off,
         "warn" => LevelFilter::Warn,
@@ -240,6 +255,16 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
         "debug" => LevelFilter::Debug,
         "trace" => LevelFilter::Trace,
         _ => LevelFilter::Error,
+    };
+
+    let mut stdout;
+    let mut output_f;
+    let f: &mut dyn Write = if let Some(output_path) = &output_file {
+        output_f = File::create(output_path).unwrap();
+        &mut output_f
+    } else {
+        stdout = std::io::stdout();
+        &mut stdout
     };
 
     // Init the logger (and make trace logging less noisy)
@@ -362,7 +387,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
     let mut minidump = dump_cache.join(&crash_id);
     minidump.set_extension("dmp");
 
-    fetch(minidump_req, &minidump).await?;
+    fetch(f, minidump_req, &minidump).await?;
 
     // Download the json socorro has for the minidump
     let socc_output_req = reqwest::Client::new()
@@ -372,7 +397,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
     let mut socc_output = dump_cache.join(&crash_id);
     socc_output.set_extension("json");
 
-    let socc_json = fetch(socc_output_req, &socc_output).await?;
+    let socc_json = fetch(f, socc_output_req, &socc_output).await?;
     let socc_json: serde_json::Value = serde_json::from_reader(BufReader::new(socc_json)).unwrap();
     let socc_json = socc_json.get("json_dump").unwrap();
 
@@ -390,7 +415,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
         extra_json_path.set_extension("raw.json");
 
         // Just need it on disk for rust-minidump, don't actually need the value here.
-        let _extra_json = fetch(extra_json_req, &extra_json_path).await?;
+        let _extra_json = fetch(f, extra_json_req, &extra_json_path).await?;
 
         Some(extra_json_path)
     } else {
@@ -399,8 +424,22 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
     };
 
     // Process the minidump with local minidump-stackwalk
-    println!("analyzing...");
-    let mut command = &mut Command::new("minidump-stackwalk");
+    writeln!(f, "running local minidump-stackwalk...")?;
+
+    // Either grab whetever minidump-stackwalk is on PATH or build+run the
+    // given local checkout.
+    let mut command_temp;
+    let mut command = if let Some(local_checkout) = local_checkout {
+        command_temp = Command::new("cargo");
+        command_temp
+            .current_dir(local_checkout)
+            .arg("run")
+            .arg("--release")
+            .arg("--")
+    } else {
+        command_temp = Command::new("minidump-stackwalk");
+        &mut command_temp
+    };
 
     if let Some(raw_json) = &raw_json {
         let mut arg = OsString::from("--raw-json=");
@@ -438,44 +477,57 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
         command = command.arg(arg);
     }
 
-    let _ = command
-        .arg(&minidump)
-        .arg("--verbose=trace")
-        .stdout(Stdio::piped())
-        .output()
-        .unwrap();
-    println!("analyzed!");
+    command = command.arg(&minidump).arg("--verbose=trace");
+
+    // Different approaches to forwarding subprocess stdout based on
+    // whether we're writing to a file or not.
+    if output_file.is_some() {
+        let output = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .output()
+            .unwrap();
+        writeln!(f, "{}", String::from_utf8_lossy(&output.stdout))?;
+    } else {
+        let _ = command.status().unwrap();
+    }
+
+    writeln!(f, "done!")?;
+    writeln!(f, "comparing json...")?;
 
     let rust_json_file = File::open(&local_output).unwrap();
     let rust_json: serde_json::Value =
         serde_json::from_reader(BufReader::new(rust_json_file)).unwrap();
 
-    compare_crashes(compare_field, &ignored_fields, &socc_json, &rust_json);
+    compare_crashes(f, compare_field, &ignored_fields, &socc_json, &rust_json)?;
 
-    println!("\nOutput Files: ");
-    println!("  * Minidump: {}", minidump.display());
-    println!("  * Socorro Processed Crash: {}", socc_output.display());
+    writeln!(f, "\nOutput Files: ")?;
+    writeln!(f, "  * Minidump: {}", minidump.display())?;
+    writeln!(f, "  * Socorro Processed Crash: {}", socc_output.display())?;
     if let Some(raw_json) = &raw_json {
-        println!("  * Raw JSON: {}", raw_json.display());
+        writeln!(f, "  * Raw JSON: {}", raw_json.display())?;
     }
-    println!(
+    writeln!(
+        f,
         "  * Local minidump-stackwalk Output: {}",
         local_output.display()
-    );
-    println!(
+    )?;
+    writeln!(
+        f,
         "  * Local minidump-stackwalk Logs: {}",
         local_logs.display()
-    );
+    )?;
 
     Ok(())
 }
 
 fn compare_crashes(
+    f: &mut dyn Write,
     compare_field: Option<&str>,
     ignored_fields: &HashSet<&str>,
     socc_json: &serde_json::Value,
     rust_json: &serde_json::Value,
-) {
+) -> std::result::Result<(), Error> {
     let (field, socc, rust) = if let Some(field) = compare_field {
         // Only analyze this subfield
         (
@@ -488,23 +540,27 @@ fn compare_crashes(
         ("", socc_json, rust_json)
     };
 
-    println!("");
-    let (errors, warnings) = recursive_compare(0, field, socc, rust, ignored_fields);
+    writeln!(f, "")?;
+    let (errors, warnings) = recursive_compare(f, 0, field, socc, rust, ignored_fields)?;
     let status = if errors == 0 { "+" } else { "-" };
-    println!("");
-    println!(
+    writeln!(f, "")?;
+    writeln!(
+        f,
         "{} Total errors: {}, warnings: {}",
         status, errors, warnings
-    );
+    )?;
+
+    Ok(())
 }
 
 fn recursive_compare(
+    f: &mut dyn Write,
     depth: usize,
     k: &str,
     socc_val: &serde_json::Value,
     rust_val: &serde_json::Value,
     ignored: &HashSet<&str>,
-) -> (u64, u64) {
+) -> std::result::Result<(u64, u64), Error> {
     use serde_json::Value::*;
 
     let mut errors = 0;
@@ -516,62 +572,78 @@ fn recursive_compare(
     match (socc_val, rust_val) {
         (Bool(s), Bool(r)) => {
             if s == r {
-                println!(" {:width$}{}: {}", "", k, s, width = depth);
+                writeln!(f, " {:width$}{}: {}", "", k, s, width = depth)?;
             } else if ignored.contains(&k) {
                 warnings += 1;
-                println!("~{:width$}ignoring field {}: {}", "", k, s, width = depth);
+                writeln!(
+                    f,
+                    "~{:width$}ignoring field {}: {}",
+                    "",
+                    k,
+                    s,
+                    width = depth
+                )?;
             } else {
                 errors += 1;
-                println!("-{:width$}did not match", "", width = depth);
-                println!("+{:width$}{}: {}", "", k, s, width = depth);
-                println!("-{:width$}{}: {}", "", k, r, width = depth);
+                writeln!(f, "-{:width$}did not match", "", width = depth)?;
+                writeln!(f, "+{:width$}{}: {}", "", k, s, width = depth)?;
+                writeln!(f, "-{:width$}{}: {}", "", k, r, width = depth)?;
             }
         }
         (Number(s), Number(r)) => {
             if s == r {
-                println!(" {:width$}{}: {}", "", k, s, width = depth);
+                writeln!(f, " {:width$}{}: {}", "", k, s, width = depth)?;
             } else if ignored.contains(&k) {
                 warnings += 1;
-                println!("~{:width$}ignoring field {}: {}", "", k, s, width = depth);
+                writeln!(
+                    f,
+                    "~{:width$}ignoring field {}: {}",
+                    "",
+                    k,
+                    s,
+                    width = depth
+                )?;
             } else {
                 errors += 1;
-                println!("-{:width$}did not match", "", width = depth);
-                println!("+{:width$}{}: {}", "", k, s, width = depth);
-                println!("-{:width$}{}: {}", "", k, r, width = depth);
+                writeln!(f, "-{:width$}did not match", "", width = depth)?;
+                writeln!(f, "+{:width$}{}: {}", "", k, s, width = depth)?;
+                writeln!(f, "-{:width$}{}: {}", "", k, r, width = depth)?;
             }
         }
         (String(s), String(r)) => {
             if let (Some(s), Some(r)) = (parse_int(s), parse_int(r)) {
                 if s == r {
-                    println!(" {:width$}{}: 0x{:08x}", "", k, s, width = depth);
+                    writeln!(f, " {:width$}{}: 0x{:08x}", "", k, s, width = depth)?;
                 } else {
                     errors += 1;
-                    println!("-{:width$}did not match", "", width = depth);
-                    println!("+{:width$}{}: 0x{:08x}", "", k, s, width = depth);
-                    println!("-{:width$}{}: 0x{:08x}", "", k, r, width = depth);
+                    writeln!(f, "-{:width$}did not match", "", width = depth)?;
+                    writeln!(f, "+{:width$}{}: 0x{:08x}", "", k, s, width = depth)?;
+                    writeln!(f, "-{:width$}{}: 0x{:08x}", "", k, r, width = depth)?;
                 }
             } else {
                 if s == r {
-                    println!(" {:width$}{}: {}", "", k, s, width = depth);
+                    writeln!(f, " {:width$}{}: {}", "", k, s, width = depth)?;
                 } else if k == "trust" {
                     let (s_trust, r_trust) = trust_levels(socc_val, rust_val);
                     if r_trust < s_trust {
-                        println!(
+                        writeln!(
+                            f,
                             "~{:width$}rust had better trust ({} vs {})",
                             "",
                             s,
                             r,
                             width = depth
-                        );
+                        )?;
                         warnings += 1;
                     } else if s_trust < r_trust {
-                        println!(
+                        writeln!(
+                            f,
                             "-{:width$}socc had better trust ({} vs {})",
                             "",
                             s,
                             r,
                             width = depth
-                        );
+                        )?;
                         errors += 1;
                     } else {
                         // Shouldn't be possible? I want to know if this happens.
@@ -579,18 +651,19 @@ fn recursive_compare(
                     }
                 } else {
                     errors += 1;
-                    println!("-{:width$}did not match", "", width = depth);
-                    println!("+{:width$}{}: {}", "", k, s, width = depth);
-                    println!("-{:width$}{}: {}", "", k, r, width = depth);
+                    writeln!(f, "-{:width$}did not match", "", width = depth)?;
+                    writeln!(f, "+{:width$}{}: {}", "", k, s, width = depth)?;
+                    writeln!(f, "-{:width$}{}: {}", "", k, r, width = depth)?;
                 }
             }
         }
         (Object(s), Object(r)) => {
-            println!("{:width$} {}: {{", "", k, width = depth);
+            writeln!(f, "{:width$} {}: {{", "", k, width = depth)?;
             let new_depth = depth + 2;
             for (k, s) in s {
                 if let Some(r) = r.get(k) {
-                    let (new_errors, new_warnings) = recursive_compare(new_depth, k, s, r, ignored);
+                    let (new_errors, new_warnings) =
+                        recursive_compare(f, new_depth, k, s, r, ignored)?;
                     errors += new_errors;
                     warnings += new_warnings;
                 } else {
@@ -598,21 +671,22 @@ fn recursive_compare(
                         // Ok to be missing a null
                     } else if ignored.contains(&&**k) {
                         warnings += 1;
-                        println!(
+                        writeln!(
+                            f,
                             "~{:width$}ignoring field {}: {}",
                             "",
                             k,
                             s,
                             width = new_depth
-                        );
+                        )?;
                     } else {
                         errors += 1;
-                        println!("-{:width$}rust was missing", "", width = new_depth);
-                        println!("+{:width$}{}: {}", "", k, s, width = new_depth);
+                        writeln!(f, "-{:width$}rust was missing", "", width = new_depth)?;
+                        writeln!(f, "+{:width$}{}: {}", "", k, s, width = new_depth)?;
                     }
                 }
             }
-            println!("{:width$} }}", "", width = depth);
+            writeln!(f, "{:width$} }}", "", width = depth)?;
         }
         (Array(s), Array(r)) => {
             if k == "modules" {
@@ -636,18 +710,18 @@ fn recursive_compare(
                 all_keys.extend(r_modules.keys());
 
                 let new_depth = depth + 2;
-                println!("{:width$} {}: [", "", k, width = depth);
+                writeln!(f, "{:width$} {}: [", "", k, width = depth)?;
                 for (i, &key) in all_keys.iter().enumerate() {
                     let s_val = s_modules.get(key).unwrap_or(&&Null);
                     let r_val = r_modules.get(key).unwrap_or(&&Null);
 
                     let (new_errors, new_warnings) =
-                        recursive_compare(new_depth, &i.to_string(), s_val, r_val, ignored);
+                        recursive_compare(f, new_depth, &i.to_string(), s_val, r_val, ignored)?;
 
                     errors += new_errors;
                     warnings += new_warnings;
                 }
-                println!("{:width$} {}: ]", "", k, width = depth);
+                writeln!(f, "{:width$} {}: ]", "", k, width = depth)?;
             } else {
                 // The bulk of the refined analysis happens here, as we try to more intelligently
                 // handle the array of frames in a backtrace. This is important because very small
@@ -658,7 +732,7 @@ fn recursive_compare(
                 let r_len = r.len();
                 let len = if s_len < r_len { s_len } else { r_len };
 
-                println!("{:width$} {}: [", "", k, width = depth);
+                writeln!(f, "{:width$} {}: [", "", k, width = depth)?;
                 let new_depth = depth + 2;
 
                 let mut s_offset = 0;
@@ -721,16 +795,22 @@ fn recursive_compare(
                                         let r_val = &r[r_offset];
                                         if s_trust <= r_trust {
                                             errors += 1;
-                                            println!(
+                                            writeln!(
+                                                f,
                                                 "-{:width$}rust had extra array value:",
                                                 "",
                                                 width = new_depth
-                                            );
+                                            )?;
                                         } else {
                                             warnings += 1;
-                                            println!("~{:width$}rust had extra array value (but rust has better trust):", "", width=new_depth);
+                                            writeln!(f, "~{:width$}rust had extra array value (but rust has better trust):", "", width=new_depth)?;
                                         }
-                                        recursive_print(new_depth, &r_offset.to_string(), r_val);
+                                        recursive_print(
+                                            f,
+                                            new_depth,
+                                            &r_offset.to_string(),
+                                            r_val,
+                                        )?;
                                     }
                                     r_offset += r_skip;
                                     continue;
@@ -743,16 +823,22 @@ fn recursive_compare(
 
                                         if s_trust <= r_trust {
                                             errors += 1;
-                                            println!(
+                                            writeln!(
+                                                f,
                                                 "-{:width$}socc had extra array value:",
                                                 "",
                                                 width = new_depth
-                                            );
+                                            )?;
                                         } else {
                                             warnings += 1;
-                                            println!("~{:width$}socc had extra array value (but rust has better trust):", "", width=new_depth);
+                                            writeln!(f, "~{:width$}socc had extra array value (but rust has better trust):", "", width=new_depth)?;
                                         }
-                                        recursive_print(new_depth, &s_offset.to_string(), s_val);
+                                        recursive_print(
+                                            f,
+                                            new_depth,
+                                            &s_offset.to_string(),
+                                            s_val,
+                                        )?;
                                     }
                                     s_offset += s_skip;
                                     continue;
@@ -763,8 +849,14 @@ fn recursive_compare(
 
                     // If we get here then there wasn't any opportunity to more intelligently analyze this pair
                     // of array entries -- just recursively compare their individual fields instead.
-                    let (new_errors, new_warnings) =
-                        recursive_compare(new_depth, &s_offset.to_string(), s_val, r_val, ignored);
+                    let (new_errors, new_warnings) = recursive_compare(
+                        f,
+                        new_depth,
+                        &s_offset.to_string(),
+                        s_val,
+                        r_val,
+                        ignored,
+                    )?;
                     errors += new_errors;
                     warnings += new_warnings;
 
@@ -795,110 +887,126 @@ fn recursive_compare(
                 for i in s_offset..s_len {
                     if last_s_trust <= last_r_trust {
                         errors += 1;
-                        println!(
+                        writeln!(
+                            f,
                             "-{:width$}rust was missing array value:",
                             "",
                             width = new_depth
-                        );
+                        )?;
                     } else {
                         warnings += 1;
-                        println!(
+                        writeln!(
+                            f,
                             "~{:width$}rust was missing array value (but rust has better trust):",
                             "",
                             width = new_depth
-                        );
+                        )?;
                     }
-                    recursive_print(new_depth, &i.to_string(), &s[i]);
+                    recursive_print(f, new_depth, &i.to_string(), &s[i])?;
                 }
                 for i in r_offset..r_len {
                     if last_s_trust <= last_r_trust {
                         errors += 1;
-                        println!(
+                        writeln!(
+                            f,
                             "-{:width$}rust had extra array value:",
                             "",
                             width = new_depth
-                        );
+                        )?;
                     } else {
                         warnings += 1;
-                        println!(
+                        writeln!(
+                            f,
                             "~{:width$}rust had extra array value (but rust has better trust):",
                             "",
                             width = new_depth
-                        );
+                        )?;
                     }
-                    recursive_print(new_depth, &i.to_string(), &r[i]);
+                    recursive_print(f, new_depth, &i.to_string(), &r[i])?;
                 }
-                println!(" {:width$}]", "", width = depth);
+                writeln!(f, " {:width$}]", "", width = depth)?;
             }
         }
         (_, Null) => {
             if ignored.contains(k) {
                 warnings += 1;
-                println!("~{:width$}ignoring null rust val:", "", width = depth);
-                recursive_print(depth, k, socc_val);
+                writeln!(f, "~{:width$}ignoring null rust val:", "", width = depth)?;
+                recursive_print(f, depth, k, socc_val)?;
             } else {
                 errors += 1;
-                println!("-{:width$}rust val was null instead of:", "", width = depth);
-                recursive_print(depth, k, socc_val);
+                writeln!(
+                    f,
+                    "-{:width$}rust val was null instead of:",
+                    "",
+                    width = depth
+                )?;
+                recursive_print(f, depth, k, socc_val)?;
             }
         }
         _ => {
             errors += 1;
-            println!(
+            writeln!(
+                f,
                 "-{:width$}completely different types for {}:",
                 "",
                 k,
                 width = depth
-            );
-            println!("+");
-            recursive_print(depth + 2, k, socc_val);
-            println!("-");
-            recursive_print(depth + 2, k, rust_val);
+            )?;
+            writeln!(f, "+")?;
+            recursive_print(f, depth + 2, k, socc_val)?;
+            writeln!(f, "-")?;
+            recursive_print(f, depth + 2, k, rust_val)?;
         }
     }
-    (errors, warnings)
+    Ok((errors, warnings))
 }
 
-fn recursive_print(depth: usize, k: &str, val: &serde_json::Value) {
+fn recursive_print(
+    f: &mut dyn Write,
+    depth: usize,
+    k: &str,
+    val: &serde_json::Value,
+) -> std::result::Result<(), Error> {
     use serde_json::Value::*;
 
     match val {
         Bool(val) => {
-            println!("{:width$} {}: {}", "", k, val, width = depth);
+            writeln!(f, "{:width$} {}: {}", "", k, val, width = depth)?;
         }
         Number(val) => {
-            println!("{:width$} {}: {}", "", k, val, width = depth);
+            writeln!(f, "{:width$} {}: {}", "", k, val, width = depth)?;
         }
         String(val) => {
-            println!("{:width$} {}: {}", "", k, val, width = depth);
+            writeln!(f, "{:width$} {}: {}", "", k, val, width = depth)?;
         }
         Object(val) => {
-            println!("{:width$} {}: {{", "", k, width = depth);
+            writeln!(f, "{:width$} {}: {{", "", k, width = depth)?;
             for (k, v) in val {
-                recursive_print(depth + 2, k, v);
+                recursive_print(f, depth + 2, k, v)?;
             }
-            println!("{:width$} }}", "", width = depth);
+            writeln!(f, "{:width$} }}", "", width = depth)?;
         }
         Array(val) => {
-            println!("{:width$} {}: [", "", k, width = depth);
+            writeln!(f, "{:width$} {}: [", "", k, width = depth)?;
             for i in 0..val.len() {
-                recursive_print(depth + 2, &i.to_string(), &val[i]);
+                recursive_print(f, depth + 2, &i.to_string(), &val[i])?;
             }
-            println!("{:width$} ]", "", width = depth);
+            writeln!(f, "{:width$} ]", "", width = depth)?;
         }
         Null => {
-            println!("{:width$} {}: null", "", k, width = depth);
+            writeln!(f, "{:width$} {}: null", "", k, width = depth)?;
         }
     }
+    Ok(())
 }
 
-async fn fetch(request: reqwest::RequestBuilder, path: &Path) -> Result<File> {
+async fn fetch(f: &mut dyn Write, request: reqwest::RequestBuilder, path: &Path) -> Result<File> {
     let name = path.file_name().unwrap().to_str().unwrap();
     if let Ok(file) = File::open(path) {
-        println!("Had cached {}", name);
+        writeln!(f, "Had cached {}", name)?;
         Ok(file)
     } else {
-        println!("Downloading {}", name);
+        writeln!(f, "Downloading {}", name)?;
         let payload = request.send().await?;
 
         let mut file = OpenOptions::new()
@@ -909,7 +1017,7 @@ async fn fetch(request: reqwest::RequestBuilder, path: &Path) -> Result<File> {
 
         let content = payload.bytes().await?;
         copy(&mut &*content, &mut file)?;
-        println!("Downloaded!");
+        writeln!(f, "Downloaded!")?;
         file.seek(SeekFrom::Start(0))?;
         Ok(file)
     }
