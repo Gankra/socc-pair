@@ -1,5 +1,7 @@
 [package]
 name = "socc-pair"
+description = "compares local minidump-stackwalk output to socorro (crash-stats.mozilla.org)"
+license = "MIT"
 version = "0.1.0"
 edition = "2018"
 
