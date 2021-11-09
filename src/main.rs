@@ -54,6 +54,7 @@ redundant fields:
   * total_frames
   * frame_count
   * threads_index
+  * frame
 
 debugging fields:
   * missing_symbols
@@ -338,6 +339,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
         "total_frames",
         "frame_count",
         "threads_index",
+        "frame",
         // execution debugging
         "missing_symbols",
         "symbol_disk_cache_hit",
@@ -616,6 +618,16 @@ fn recursive_compare(
             if let (Some(s), Some(r)) = (parse_int(s), parse_int(r)) {
                 if s == r {
                     writeln!(f, " {:width$}{}: 0x{:08x}", "", k, s, width = depth)?;
+                } else if ignored.contains(&k) {
+                    writeln!(
+                        f,
+                        "~{:width$}ignoring field {}: 0x{:08x}",
+                        "",
+                        k,
+                        s,
+                        width = depth
+                    )?;
+                    warnings += 1;
                 } else {
                     errors += 1;
                     writeln!(f, "-{:width$}did not match", "", width = depth)?;
@@ -625,6 +637,15 @@ fn recursive_compare(
             } else {
                 if s == r {
                     writeln!(f, " {:width$}{}: {}", "", k, s, width = depth)?;
+                } else if ignored.contains(&k) {
+                    writeln!(
+                        f,
+                        "~{:width$}ignoring field {}: {}",
+                        "",
+                        k,
+                        s,
+                        width = depth
+                    )?;
                 } else if k == "trust" {
                     let (s_trust, r_trust) = trust_levels(socc_val, rust_val);
                     if r_trust < s_trust {
@@ -753,9 +774,9 @@ fn recursive_compare(
                     // a few frames will get everything back in sync.
                     if let (Object(s_obj), Object(r_obj)) = (s_val, r_val) {
                         if let (Some(String(s_func)), Some(String(r_func))) =
-                            (s_obj.get("function"), r_obj.get("function"))
+                            (s_obj.get("offset"), r_obj.get("offset"))
                         {
-                            if s_func != r_func {
+                            if parse_int(s_func) != parse_int(r_func) {
                                 are_different_frames = true;
                                 // Assume one of the values is "good" and scan ahead in the other for a match
                                 let try_lookahead =
@@ -771,9 +792,9 @@ fn recursive_compare(
                                                 if let (
                                                     Some(String(good_func)),
                                                     Some(String(bad_func)),
-                                                ) = (good.get("function"), bad.get("function"))
+                                                ) = (good.get("offset"), bad.get("offset"))
                                                 {
-                                                    if good_func == bad_func {
+                                                    if parse_int(good_func) == parse_int(bad_func) {
                                                         return Some(i);
                                                     }
                                                 }
@@ -947,12 +968,12 @@ fn recursive_compare(
             }
         }
         (Null, Null) => {
-            writeln!(f, " {:width$}{}: null", "", k, width=depth)?;
+            writeln!(f, " {:width$}{}: null", "", k, width = depth)?;
         }
         (_, Null) => {
             if socc_val.as_str() == Some("") {
                 // Socorro sometimes has blanks for nulls, consider them equal
-                writeln!(f, " {:width$}{}: null", "", k, width=depth)?;
+                writeln!(f, " {:width$}{}: null", "", k, width = depth)?;
             } else {
                 if ignored.contains(k) {
                     warnings += 1;
