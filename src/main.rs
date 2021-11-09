@@ -60,6 +60,7 @@ debugging fields:
   * symbol_disk_cache_hit
   * symbol_url
   * loaded_symbols
+  * symbol_fetch_time
 
 A warning will still be emitted for ignored fields. This is useful for deprecated fields \
 which you don't care about the value of, or fields which contain redundant data like
@@ -342,6 +343,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
         "symbol_disk_cache_hit",
         "symbol_url",
         "loaded_symbols",
+        "symbol_fetch_time",
     ];
 
     let ignored_fields = matches
@@ -944,20 +946,28 @@ fn recursive_compare(
                 writeln!(f, " {:width$}]", "", width = depth)?;
             }
         }
+        (Null, Null) => {
+            writeln!(f, " {:width$}{}: null", "", k, width=depth)?;
+        }
         (_, Null) => {
-            if ignored.contains(k) {
-                warnings += 1;
-                writeln!(f, "~{:width$}ignoring null rust val:", "", width = depth)?;
-                recursive_print(f, depth, k, socc_val)?;
+            if socc_val.as_str() == Some("") {
+                // Socorro sometimes has blanks for nulls, consider them equal
+                writeln!(f, " {:width$}{}: null", "", k, width=depth)?;
             } else {
-                errors += 1;
-                writeln!(
-                    f,
-                    "-{:width$}rust val was null instead of:",
-                    "",
-                    width = depth
-                )?;
-                recursive_print(f, depth, k, socc_val)?;
+                if ignored.contains(k) {
+                    warnings += 1;
+                    writeln!(f, "~{:width$}ignoring null rust val:", "", width = depth)?;
+                    recursive_print(f, depth, k, socc_val)?;
+                } else {
+                    errors += 1;
+                    writeln!(
+                        f,
+                        "-{:width$}rust val was null instead of:",
+                        "",
+                        width = depth
+                    )?;
+                    recursive_print(f, depth, k, socc_val)?;
+                }
             }
         }
         _ => {
