@@ -745,6 +745,7 @@ fn recursive_compare(
                     let s_val = &s[s_offset];
                     let r_val = &r[r_offset];
 
+                    let mut are_different_frames = false;
                     // Try to peek inside and see if these are both stack frames with different
                     // function names. If they are, try to peek ahead and see if an offset of
                     // a few frames will get everything back in sync.
@@ -753,6 +754,7 @@ fn recursive_compare(
                             (s_obj.get("function"), r_obj.get("function"))
                         {
                             if s_func != r_func {
+                                are_different_frames = true;
                                 // Assume one of the values is "good" and scan ahead in the other for a match
                                 let try_lookahead =
                                     |good: &serde_json::Map<
@@ -847,19 +849,34 @@ fn recursive_compare(
                         }
                     }
 
-                    // If we get here then there wasn't any opportunity to more intelligently analyze this pair
-                    // of array entries -- just recursively compare their individual fields instead.
-                    let (new_errors, new_warnings) = recursive_compare(
-                        f,
-                        new_depth,
-                        &s_offset.to_string(),
-                        s_val,
-                        r_val,
-                        ignored,
-                    )?;
-                    errors += new_errors;
-                    warnings += new_warnings;
-
+                    if are_different_frames {
+                        // we couldn't do any correcting by assuming an extra/missing entry in the array,
+                        // but we do know these are stack frames, with different function names. If this
+                        // happens, basically every value will be different, so only report one error
+                        // for simplicity.
+                        writeln!(
+                            f,
+                            "-{:width$}stack frames were completely different",
+                            "",
+                            width = new_depth
+                        )?;
+                        recursive_print(f, new_depth, &s_offset.to_string(), s_val)?;
+                        recursive_print(f, new_depth, &s_offset.to_string(), r_val)?;
+                        errors += 1;
+                    } else {
+                        // If we get here then there wasn't any opportunity to more intelligently analyze this pair
+                        // of array entries -- just recursively compare their individual fields instead.
+                        let (new_errors, new_warnings) = recursive_compare(
+                            f,
+                            new_depth,
+                            &s_offset.to_string(),
+                            s_val,
+                            r_val,
+                            ignored,
+                        )?;
+                        errors += new_errors;
+                        warnings += new_warnings;
+                    }
                     s_offset += 1;
                     r_offset += 1;
                 }
