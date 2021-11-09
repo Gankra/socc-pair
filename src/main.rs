@@ -689,7 +689,7 @@ fn recursive_compare(
             writeln!(f, "{:width$} }}", "", width = depth)?;
         }
         (Array(s), Array(r)) => {
-            if k == "modules" {
+            if k == "modules" || k == "unloaded_modules" {
                 // The module array is really a Set -- order doesn't matter. Analyze it as such.
                 // "filename" is the key we generally use here, since it rarely conflicts.
                 let convert_modules_to_map = |arr: &[serde_json::Value]| {
