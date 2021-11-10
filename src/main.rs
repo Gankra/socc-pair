@@ -744,7 +744,7 @@ fn recursive_compare(
                     errors += new_errors;
                     warnings += new_warnings;
                 }
-                writeln!(f, "{:width$} {}: ]", "", k, width = depth)?;
+                writeln!(f, "{:width$} ]", "", width = depth)?;
             } else {
                 // The bulk of the refined analysis happens here, as we try to more intelligently
                 // handle the array of frames in a backtrace. This is important because very small
