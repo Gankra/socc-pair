@@ -99,8 +99,10 @@ Output Files:
 ## Debugging Backtraces
 
 socc-pair will capture and store the logging output of rust-minidump (see the "Local minidump-stackwalk Logs" path at the end of the above example). socc-pair also configures
-rust-minidump to use `trace` logging, which includes a detailed trace of how it
+rust-minidump to use `trace` logging by default, which includes a detailed trace of how it
 performed each stackwalk.
+
+(If logging is misbehaving, it can be configured with `--verbose`)
 
 Some tips on reading these logs:
 

@@ -28,10 +28,10 @@ async fn main() -> Result<()> {
         .arg(
             Arg::with_name("verbose")
                 .long("verbose")
-                .default_value("error")
+                .default_value("trace")
                 .takes_value(true)
                 .long_help(
-                    "Set the level of verbosity (off, error (default), warn, info, debug, trace)",
+                    "Set the level of verbosity (off, error, warn, info, debug, trace (default))",
                 ),
         )
         .arg(
@@ -42,7 +42,9 @@ async fn main() -> Result<()> {
                 .long_help(
                     "Fields in the json output to ignore the value of during comparison.
 
-If no values are provided, the default ignores will be:
+This is additive to the default ignore list. If you wish to disable the defaults, use --no-default-ignores
+
+The default ignores are:
 
 deprecated fields:
   * frames_truncated
@@ -66,6 +68,13 @@ debugging fields:
 A warning will still be emitted for ignored fields. This is useful for deprecated fields \
 which you don't care about the value of, or fields which contain redundant data like
 the length of an array.\n\n\n",
+                ),
+        )
+        .arg(
+            Arg::with_name("no-default-ignores")
+                .long("no-default-ignores")
+                .long_help(
+                    "Disable the default list of --ignore-field.\n\n",
                 ),
         )
         .arg(
@@ -155,8 +164,7 @@ To this end, the default value for this flag is a `rust-minidump-cache` \
 subdirectory of `std::env::temp_dir()` (usually /tmp/rust-minidump-cache on linux).
 
 symbols-cache must be on the same filesystem as symbols-tmp (if that doesn't mean anything to \
-you, don't worry about it, you're probably not doing something that will run afoul of it).
-\n\n\n",
+you, don't worry about it, you're probably not doing something that will run afoul of it).\n\n\n",
                 ),
         )
         .arg(
@@ -175,8 +183,7 @@ See the rust documentation for how to set that value if you wish to use somethin
 your system's default temp directory.
 
 symbols-tmp must be on the same filesystem as symbols-cache (if that doesn't mean anything to \
-you, don't worry about it, you're probably not doing something that will run afoul of it).
-\n\n\n",
+you, don't worry about it, you're probably not doing something that will run afoul of it).\n\n\n",
                 ),
         )
         .arg(
@@ -198,9 +205,7 @@ you, don't worry about it, you're probably not doing something that will run afo
                 .long_help(
                     "A path to a local rust-minidump/minidump-stackwalk checkout to build and run
 
-`cargo run --release -- <args>` will be invoked in the given directory.
-
-",
+`cargo run --release -- <args>` will be invoked in the given directory.\n\n\n",
                 ),
         )
         .arg(
@@ -216,8 +221,7 @@ Required permissions:
 * 'View Raw Dumps' (hard required)
 * 'View Personal Identifiable Information' (to read some entries in raw-json)
 
-See https://crash-stats.mozilla.org/api/tokens/ for details.
-\n\n\n",
+See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
                 ),
         )
         .arg(
@@ -226,15 +230,8 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
                 .takes_value(true)
                 .required(true)
                 .long_help(
-                    "The socorro crash id to analyze
-\n\n\n",
+                    "The socorro crash id to analyze.\n\n",
                 ),
-        )
-        .after_help(
-            "
-
-
-",
         )
         .get_matches();
 
@@ -250,7 +247,8 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
         .value_of_os("run-local")
         .map(|os_str| Path::new(os_str).to_owned());
 
-    let verbosity = match matches.value_of("verbose").unwrap() {
+    let verbose = matches.value_of("verbose").unwrap();
+    let verbosity = match verbose {
         "off" => LevelFilter::Off,
         "warn" => LevelFilter::Warn,
         "info" => LevelFilter::Info,
@@ -348,17 +346,13 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
         "symbol_fetch_time",
     ];
 
-    let ignored_fields = matches
-        .values_of("ignore-field")
-        .map(|s| s.collect::<Vec<_>>());
+    let no_default_ignores = matches.is_present("no-default-ignores");
 
-    let ignored_fields = ignored_fields
-        .as_ref()
-        .map(|v| v.as_slice())
-        .unwrap_or(&default_ignored_fields)
-        .iter()
-        .copied()
-        .collect::<HashSet<&str>>();
+    let mut ignored_fields = HashSet::new();
+    if !no_default_ignores {
+        ignored_fields.extend(default_ignored_fields);
+    }
+    ignored_fields.extend(matches.values_of("ignore-field").unwrap_or_default().into_iter());
 
     let compare_field = matches.value_of("compare");
 
@@ -481,7 +475,13 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.
         command = command.arg(arg);
     }
 
-    command = command.arg(&minidump).arg("--verbose=trace");
+    {
+        let mut arg = OsString::from("--verbose=");
+        arg.push(&verbose);
+        command = command.arg(arg);
+    }
+
+    command = command.arg(&minidump);
 
     // Different approaches to forwarding subprocess stdout based on
     // whether we're writing to a file or not.
