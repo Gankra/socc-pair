@@ -2,7 +2,7 @@ use error_chain::error_chain;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{copy, BufReader, Seek, SeekFrom, Write};
+use std::io::{copy, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
                 .default_value("trace")
                 .takes_value(true)
                 .long_help(
-                    "Set the level of verbosity (off, error, warn, info, debug, trace (default))",
+                    "Set the level of verbosity for the local minidum-stackwalk (off, error, warn, info, debug, trace (default))",
                 ),
         )
         .arg(
@@ -248,14 +248,9 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         .map(|os_str| Path::new(os_str).to_owned());
 
     let verbose = matches.value_of("verbose").unwrap();
-    let verbosity = match verbose {
-        "off" => LevelFilter::Off,
-        "warn" => LevelFilter::Warn,
-        "info" => LevelFilter::Info,
-        "debug" => LevelFilter::Debug,
-        "trace" => LevelFilter::Trace,
-        _ => LevelFilter::Error,
-    };
+    // Verbose configures the child minidump-stackwalk, this app
+    // doesn't have significant logging.
+    let verbosity = LevelFilter::Warn;
 
     let mut stdout;
     let mut output_f;
@@ -352,7 +347,12 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     if !no_default_ignores {
         ignored_fields.extend(default_ignored_fields);
     }
-    ignored_fields.extend(matches.values_of("ignore-field").unwrap_or_default().into_iter());
+    ignored_fields.extend(
+        matches
+            .values_of("ignore-field")
+            .unwrap_or_default()
+            .into_iter(),
+    );
 
     let compare_field = matches.value_of("compare");
 
@@ -485,25 +485,39 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     // Different approaches to forwarding subprocess stdout based on
     // whether we're writing to a file or not.
-    if output_file.is_some() {
+    let status = if output_file.is_some() {
         let output = command
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .output()
-            .unwrap();
+            .output()?;
+
         writeln!(f, "{}", String::from_utf8_lossy(&output.stdout))?;
+        output.status
     } else {
-        let _ = command.status().unwrap();
+        command.status()?
+    };
+
+    if status.success() {
+        writeln!(f, "done!")?;
+        writeln!(f, "comparing json...")?;
+        let rust_json_file = File::open(&local_output)?;
+        let rust_json: serde_json::Value =
+            serde_json::from_reader(BufReader::new(rust_json_file)).unwrap();
+
+        compare_crashes(f, compare_field, &ignored_fields, &socc_json, &rust_json)?;
+    } else {
+        if let Some(code) = status.code() {
+            writeln!(f, "failed! exit status: {}", code)?;
+        } else {
+            writeln!(f, "failed! (no exit status, terminated by signal?)")?;
+        }
+        writeln!(f, "dumping logs: ")?;
+
+        let rust_log_file = File::open(&local_logs)?;
+        let mut logs = String::new();
+        BufReader::new(rust_log_file).read_to_string(&mut logs)?;
+        writeln!(f, "{}", logs)?;
     }
-
-    writeln!(f, "done!")?;
-    writeln!(f, "comparing json...")?;
-
-    let rust_json_file = File::open(&local_output).unwrap();
-    let rust_json: serde_json::Value =
-        serde_json::from_reader(BufReader::new(rust_json_file)).unwrap();
-
-    compare_crashes(f, compare_field, &ignored_fields, &socc_json, &rust_json)?;
 
     writeln!(f, "\nOutput Files: ")?;
     writeln!(f, "  * Minidump: {}", minidump.display())?;
