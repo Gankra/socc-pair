@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
         .arg(
             Arg::with_name("ignore-field")
                 .multiple(true)
+                .number_of_values(1)
                 .long("ignore-field")
                 .takes_value(true)
                 .long_help(
@@ -134,6 +135,7 @@ socc-pair will output all these paths at the end of its output.\n\n\n",
         .arg(
             Arg::with_name("symbols-url")
                 .multiple(true)
+                .number_of_values(1)
                 .long("symbols-url")
                 .default_value("https://symbols.mozilla.org/")
                 .takes_value(true)
@@ -479,6 +481,10 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         let mut arg = OsString::from("--verbose=");
         arg.push(&verbose);
         command = command.arg(arg);
+    }
+
+    {
+        command = command.arg("--json");
     }
 
     command = command.arg(&minidump);
