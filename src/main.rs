@@ -661,7 +661,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         let mins = secs / 60;
         let submin_secs = secs - (mins * 60);
 
-        writeln!(f, "{:02}m:{:02}s:{:04}ms", mins, submin_secs, subsec_millis)
+        writeln!(f, "{:02}m:{:02}s:{:03}ms", mins, submin_secs, subsec_millis)
     }
 
     if bench_iters == 1 {
