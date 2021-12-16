@@ -5,6 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{copy, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use clap::{crate_version, App, AppSettings, Arg};
 use simplelog::{
@@ -70,6 +71,45 @@ A warning will still be emitted for ignored fields. This is useful for deprecate
 which you don't care about the value of, or fields which contain redundant data like
 the length of an array.\n\n\n",
                 ),
+        )
+        .arg(
+            Arg::with_name("skip-diff")
+                .long("skip-diff")
+                .long_help(
+                    "Skip the diffing process (just download files and run minidump-stackwalk)"
+                )
+        )
+        .arg(
+            Arg::with_name("clean-cache")
+                .long("clean-cache")
+                .long_help("Delete all cached files before running.
+
+This is good to run periodically for data privacy, and for testing 'cold' runs.
+"
+                )
+        )
+        .arg(
+            Arg::with_name("no-symbols")
+                .long("no-symbols")
+                .long_help("Do not provide any symbols to minidump-stackwalk
+
+Lets you test symbol-less output.
+"
+                )
+        )
+        .arg(
+            Arg::with_name("bench")
+                .long("bench")
+                .takes_value(true)
+                .long_help(
+                    "Repeatedly run minidump-stackwalk, and aggregate the results.
+
+The provided value is the number of iterations to run.
+
+If --clean is provided, the symbols-cache will be deleted before every run \
+(but other cached files will only be deleted once, at the start.)
+"
+                )
         )
         .arg(
             Arg::with_name("no-default-ignores")
@@ -343,7 +383,17 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         "symbol_fetch_time",
     ];
 
+    let skip_diff = matches.is_present("skip-diff");
     let no_default_ignores = matches.is_present("no-default-ignores");
+    let clean_cache = matches.is_present("clean-cache");
+    let no_symbols = matches.is_present("no-symbols");
+
+    let bench_iters = matches
+        .value_of("bench")
+        .unwrap_or("1")
+        .parse::<u64>()
+        .expect("bench argument wasn't an integer!");
+    assert!(bench_iters > 0, "bench iterations must be at least 1!");
 
     let mut ignored_fields = HashSet::new();
     if !no_default_ignores {
@@ -358,7 +408,14 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     let compare_field = matches.value_of("compare");
 
-    // Ensure the dump cache exists
+    /////////////////////////////////////////////////////////////
+    /////////// ACTUAL EXECUTION STARTS HERE ////////////////////
+    /////////////////////////////////////////////////////////////
+
+    // Ensure the dump cache exists (and maybe clear it)
+    if clean_cache {
+        fs::remove_dir_all(&dump_cache)?;
+    }
     fs::create_dir_all(&dump_cache)?;
 
     // output paths to report:
@@ -424,22 +481,64 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     };
 
     // Process the minidump with local minidump-stackwalk
-    writeln!(f, "running local minidump-stackwalk...")?;
 
     // Either grab whetever minidump-stackwalk is on PATH or build+run the
     // given local checkout.
     let mut command_temp;
     let mut command = if let Some(local_checkout) = local_checkout {
-        command_temp = Command::new("cargo");
-        command_temp
+        writeln!(f)?;
+        writeln!(f, "building local minidump-stackwalk...")?;
+
+        let output = Command::new("cargo")
             .current_dir(local_checkout)
-            .arg("run")
+            .arg("build")
             .arg("--release")
-            .arg("--")
+            .arg("--message-format=json")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .output()?;
+
+        let output_string = String::from_utf8_lossy(&output.stdout);
+        let mut bin: String = String::new();
+        for line in output_string.lines() {
+            if line.starts_with("{") {
+                let obj: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let is_artifact = obj
+                    .get("reason")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or_default()
+                    == "compiler-artifact";
+                let is_mdsw = obj
+                    .get("package_id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or_default()
+                    .starts_with("minidump-stackwalk");
+                if is_artifact && is_mdsw {
+                    bin = obj
+                        .get("executable")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                }
+            } else {
+                writeln!(f, "{}", line)?;
+            }
+        }
+
+        writeln!(f, "built {}", bin)?;
+        command_temp = Command::new(bin);
+        &mut command_temp
     } else {
         command_temp = Command::new("minidump-stackwalk");
         &mut command_temp
     };
+
+    writeln!(f)?;
+    writeln!(
+        f,
+        "running local minidump-stackwalk... ({} times)",
+        bench_iters
+    )?;
 
     if let Some(raw_json) = &raw_json {
         let mut arg = OsString::from("--raw-json=");
@@ -447,22 +546,24 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         command = command.arg(arg);
     }
 
-    for url in symbols_urls {
-        let mut arg = OsString::from("--symbols-url=");
-        arg.push(&url);
-        command = command.arg(arg);
-    }
+    if !no_symbols {
+        for url in symbols_urls {
+            let mut arg = OsString::from("--symbols-url=");
+            arg.push(&url);
+            command = command.arg(arg);
+        }
 
-    {
-        let mut arg = OsString::from("--symbols-cache=");
-        arg.push(&symbols_cache);
-        command = command.arg(arg);
-    }
+        {
+            let mut arg = OsString::from("--symbols-cache=");
+            arg.push(&symbols_cache);
+            command = command.arg(arg);
+        }
 
-    {
-        let mut arg = OsString::from("--symbols-tmp=");
-        arg.push(&symbols_tmp);
-        command = command.arg(arg);
+        {
+            let mut arg = OsString::from("--symbols-tmp=");
+            arg.push(&symbols_tmp);
+            command = command.arg(arg);
+        }
     }
 
     {
@@ -491,28 +592,55 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     // Different approaches to forwarding subprocess stdout based on
     // whether we're writing to a file or not.
-    let status = if output_file.is_some() {
-        let output = command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .output()?;
 
-        writeln!(f, "{}", String::from_utf8_lossy(&output.stdout))?;
-        output.status
+    let mut status = None;
+    let mut times = vec![];
+
+    for i in 0..bench_iters {
+        // Start by cleaning out the symbol cache (if needed)
+        if clean_cache {
+            fs::remove_dir_all(&symbols_cache)?;
+        }
+
+        if output_file.is_some() {
+            let final_command = &mut *command.stdout(Stdio::piped()).stderr(Stdio::inherit());
+
+            let start = Instant::now();
+            let output = final_command.output()?;
+            let end = Instant::now();
+
+            writeln!(f, "{}", String::from_utf8_lossy(&output.stdout))?;
+            status = Some(output.status);
+            times.push(end - start);
+        } else {
+            let final_command = &mut *command;
+
+            let start = Instant::now();
+            status = final_command.status().ok();
+            let end = Instant::now();
+
+            times.push(end - start);
+        };
+        if status.unwrap().success() {
+            writeln!(f, "done! ({}/{})", i + 1, bench_iters)?;
+        } else {
+            writeln!(f, "failed! ({}/{})", i + 1, bench_iters)?;
+        }
+    }
+
+    if status.unwrap().success() {
+        writeln!(f, "all done!")?;
+
+        if !skip_diff {
+            writeln!(f, "comparing json...")?;
+            let rust_json_file = File::open(&local_output)?;
+            let rust_json: serde_json::Value =
+                serde_json::from_reader(BufReader::new(rust_json_file)).unwrap();
+
+            compare_crashes(f, compare_field, &ignored_fields, &socc_json, &rust_json)?;
+        }
     } else {
-        command.status()?
-    };
-
-    if status.success() {
-        writeln!(f, "done!")?;
-        writeln!(f, "comparing json...")?;
-        let rust_json_file = File::open(&local_output)?;
-        let rust_json: serde_json::Value =
-            serde_json::from_reader(BufReader::new(rust_json_file)).unwrap();
-
-        compare_crashes(f, compare_field, &ignored_fields, &socc_json, &rust_json)?;
-    } else {
-        if let Some(code) = status.code() {
+        if let Some(code) = status.unwrap().code() {
             writeln!(f, "failed! exit status: {}", code)?;
         } else {
             writeln!(f, "failed! (no exit status, terminated by signal?)")?;
@@ -525,11 +653,58 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         writeln!(f, "{}", logs)?;
     }
 
-    writeln!(f, "\nOutput Files: ")?;
-    writeln!(f, "  * Minidump: {}", minidump.display())?;
-    writeln!(f, "  * Socorro Processed Crash: {}", socc_output.display())?;
+    writeln!(f)?;
+
+    fn write_time<F: Write>(mut f: F, time: Duration) -> std::result::Result<(), std::io::Error> {
+        let secs = time.as_secs();
+        let subsec_millis = time.subsec_millis();
+        let mins = secs / 60;
+        let submin_secs = secs - (mins * 60);
+
+        writeln!(f, "{:02}m:{:02}s:{:04}ms", mins, submin_secs, subsec_millis)
+    }
+
+    if bench_iters == 1 {
+        write!(f, "miniump-stackwalk runtime: ")?;
+        write_time(&mut *f, times[0])?;
+    } else {
+        writeln!(f, "benchmark results (ms):")?;
+        write!(f, "  ")?;
+        let mut total_millis = 0;
+        for time in &times {
+            let millis = time.as_millis();
+            write!(f, "{}, ", millis)?;
+            total_millis += time.as_millis();
+        }
+        writeln!(f)?;
+
+        // Sort to get ordered statistics
+        times.sort();
+
+        let average = Duration::from_millis((total_millis / (times.len() as u128)) as u64);
+        let median = times[times.len() / 2];
+        let min = *times.first().unwrap();
+        let max = *times.last().unwrap();
+
+        write!(f, "average runtime: ")?;
+        write_time(&mut *f, average)?;
+        write!(f, "median runtime: ")?;
+        write_time(&mut *f, median)?;
+        write!(f, "min runtime: ")?;
+        write_time(&mut *f, min)?;
+        write!(f, "max runtime: ")?;
+        write_time(&mut *f, max)?;
+    }
+    writeln!(f)?;
+    writeln!(f, "Output Files: ")?;
+    writeln!(f, "  * (download) Minidump: {}", minidump.display())?;
+    writeln!(
+        f,
+        "  * (download) Socorro Processed Crash: {}",
+        socc_output.display()
+    )?;
     if let Some(raw_json) = &raw_json {
-        writeln!(f, "  * Raw JSON: {}", raw_json.display())?;
+        writeln!(f, "  * (download) Raw JSON: {}", raw_json.display())?;
     }
     writeln!(
         f,
