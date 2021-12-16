@@ -633,11 +633,11 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
         if !skip_diff {
             writeln!(f, "comparing json...")?;
-            let rust_json_file = File::open(&local_output)?;
-            let rust_json: serde_json::Value =
-                serde_json::from_reader(BufReader::new(rust_json_file)).unwrap();
+            let local_json_file = File::open(&local_output)?;
+            let local_json: serde_json::Value =
+                serde_json::from_reader(BufReader::new(local_json_file)).unwrap();
 
-            compare_crashes(f, compare_field, &ignored_fields, &socc_json, &rust_json)?;
+            compare_crashes(f, compare_field, &ignored_fields, &socc_json, &local_json)?;
         }
     } else {
         if let Some(code) = status.unwrap().code() {
@@ -647,9 +647,9 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         }
         writeln!(f, "dumping logs: ")?;
 
-        let rust_log_file = File::open(&local_logs)?;
+        let local_log_file = File::open(&local_logs)?;
         let mut logs = String::new();
-        BufReader::new(rust_log_file).read_to_string(&mut logs)?;
+        BufReader::new(local_log_file).read_to_string(&mut logs)?;
         writeln!(f, "{}", logs)?;
     }
 
@@ -725,22 +725,22 @@ fn compare_crashes(
     compare_field: Option<&str>,
     ignored_fields: &HashSet<&str>,
     socc_json: &serde_json::Value,
-    rust_json: &serde_json::Value,
+    local_json: &serde_json::Value,
 ) -> std::result::Result<(), Error> {
-    let (field, socc, rust) = if let Some(field) = compare_field {
+    let (field, socc, local) = if let Some(field) = compare_field {
         // Only analyze this subfield
         (
             field,
             socc_json.get(field).unwrap(),
-            rust_json.get(field).unwrap(),
+            local_json.get(field).unwrap(),
         )
     } else {
         // Analyze the whole output
-        ("", socc_json, rust_json)
+        ("", socc_json, local_json)
     };
 
     writeln!(f, "")?;
-    let (errors, warnings) = recursive_compare(f, 0, field, socc, rust, ignored_fields)?;
+    let (errors, warnings) = recursive_compare(f, 0, field, socc, local, ignored_fields)?;
     let status = if errors == 0 { "+" } else { "-" };
     writeln!(f, "")?;
     writeln!(
@@ -757,7 +757,7 @@ fn recursive_compare(
     depth: usize,
     k: &str,
     socc_val: &serde_json::Value,
-    rust_val: &serde_json::Value,
+    local_val: &serde_json::Value,
     ignored: &HashSet<&str>,
 ) -> std::result::Result<(u64, u64), Error> {
     use serde_json::Value::*;
@@ -768,7 +768,7 @@ fn recursive_compare(
     // These fields are either redundant or unimportant. Treat them being missing as only
     // a warning to allow us to focus on more significant problems.
 
-    match (socc_val, rust_val) {
+    match (socc_val, local_val) {
         (Bool(s), Bool(r)) => {
             if s == r {
                 writeln!(f, " {:width$}{}: {}", "", k, s, width = depth)?;
@@ -842,11 +842,11 @@ fn recursive_compare(
                         width = depth
                     )?;
                 } else if k == "trust" {
-                    let (s_trust, r_trust) = trust_levels(socc_val, rust_val);
+                    let (s_trust, r_trust) = trust_levels(socc_val, local_val);
                     if r_trust < s_trust {
                         writeln!(
                             f,
-                            "~{:width$}rust had better trust ({} vs {})",
+                            "~{:width$}local had better trust ({} vs {})",
                             "",
                             s,
                             r,
@@ -899,7 +899,7 @@ fn recursive_compare(
                         )?;
                     } else {
                         errors += 1;
-                        writeln!(f, "-{:width$}rust was missing", "", width = new_depth)?;
+                        writeln!(f, "-{:width$}local was missing", "", width = new_depth)?;
                         writeln!(f, "+{:width$}{}: {}", "", k, s, width = new_depth)?;
                     }
                 }
@@ -956,7 +956,7 @@ fn recursive_compare(
                 let mut s_offset = 0;
                 let mut r_offset = 0;
 
-                // Iterate through all pairable values of the array (the equivalent of rust's
+                // Iterate through all pairable values of the array (the equivalent of local's
                 // Iterator::zip(), but done manually so that we can advance only one of the
                 // iterators when it would make a cleaner comparison).
                 while s_offset < len && r_offset < len {
@@ -999,17 +999,17 @@ fn recursive_compare(
                                     };
 
                                 // If we do find skipping some frames results in a match, we only emit a warning
-                                // if the rust frame had a better (lower) trust level. This hopefully allows us
-                                // to focus on places where rust is doing something weird on equal or worse
-                                // information. This will however supress situations where rust is failing
+                                // if the local frame had a better (lower) trust level. This hopefully allows us
+                                // to focus on places where local is doing something weird on equal or worse
+                                // information. This will however supress situations where local is failing
                                 // to properly validate itself and e.g. accepts malformed results from cfi.
                                 let (s_trust, r_trust) = trust_levels(
                                     s_obj.get("trust").unwrap(),
                                     r_obj.get("trust").unwrap(),
                                 );
                                 if let Some(r_skip) = try_lookahead(&s_obj, &r, r_offset) {
-                                    // We found a match further along the rust array, print the frames we're
-                                    // skipping more concisely and jump ahead in rust's stream.
+                                    // We found a match further along the local array, print the frames we're
+                                    // skipping more concisely and jump ahead in local's stream.
                                     for i in 0..r_skip {
                                         let r_offset = r_offset + i;
                                         let r_val = &r[r_offset];
@@ -1017,13 +1017,13 @@ fn recursive_compare(
                                             errors += 1;
                                             writeln!(
                                                 f,
-                                                "-{:width$}rust had extra array value:",
+                                                "-{:width$}local had extra array value:",
                                                 "",
                                                 width = new_depth
                                             )?;
                                         } else {
                                             warnings += 1;
-                                            writeln!(f, "~{:width$}rust had extra array value (but rust has better trust):", "", width=new_depth)?;
+                                            writeln!(f, "~{:width$}local had extra array value (but local has better trust):", "", width=new_depth)?;
                                         }
                                         recursive_print(
                                             f,
@@ -1051,7 +1051,7 @@ fn recursive_compare(
                                             )?;
                                         } else {
                                             warnings += 1;
-                                            writeln!(f, "~{:width$}socc had extra array value (but rust has better trust):", "", width=new_depth)?;
+                                            writeln!(f, "~{:width$}socc had extra array value (but local has better trust):", "", width=new_depth)?;
                                         }
                                         recursive_print(
                                             f,
@@ -1103,9 +1103,9 @@ fn recursive_compare(
                 // some extra trailing values, and we try to report those here.
 
                 // Try to get the trust levels of the last entries we looked at. This way we
-                // can make it only a warning if rust was going into these trailing values with a
+                // can make it only a warning if local was going into these trailing values with a
                 // better (lower) trust level. If it did, presumably these frames are either socc
-                // hallucinating junk or rust producing richer information...... presumably...
+                // hallucinating junk or local producing richer information...... presumably...
                 let mut last_s_trust = 99;
                 let mut last_r_trust = 99;
                 if s_offset > 0 && r_offset > 0 {
@@ -1124,7 +1124,7 @@ fn recursive_compare(
                         errors += 1;
                         writeln!(
                             f,
-                            "-{:width$}rust was missing array value:",
+                            "-{:width$}local was missing array value:",
                             "",
                             width = new_depth
                         )?;
@@ -1132,7 +1132,7 @@ fn recursive_compare(
                         warnings += 1;
                         writeln!(
                             f,
-                            "~{:width$}rust was missing array value (but rust has better trust):",
+                            "~{:width$}local was missing array value (but local has better trust):",
                             "",
                             width = new_depth
                         )?;
@@ -1144,7 +1144,7 @@ fn recursive_compare(
                         errors += 1;
                         writeln!(
                             f,
-                            "-{:width$}rust had extra array value:",
+                            "-{:width$}local had extra array value:",
                             "",
                             width = new_depth
                         )?;
@@ -1152,7 +1152,7 @@ fn recursive_compare(
                         warnings += 1;
                         writeln!(
                             f,
-                            "~{:width$}rust had extra array value (but rust has better trust):",
+                            "~{:width$}local had extra array value (but local has better trust):",
                             "",
                             width = new_depth
                         )?;
@@ -1172,13 +1172,13 @@ fn recursive_compare(
             } else {
                 if ignored.contains(k) {
                     warnings += 1;
-                    writeln!(f, "~{:width$}ignoring null rust val:", "", width = depth)?;
+                    writeln!(f, "~{:width$}ignoring null local val:", "", width = depth)?;
                     recursive_print(f, depth, k, socc_val)?;
                 } else {
                     errors += 1;
                     writeln!(
                         f,
-                        "-{:width$}rust val was null instead of:",
+                        "-{:width$}local val was null instead of:",
                         "",
                         width = depth
                     )?;
@@ -1198,7 +1198,7 @@ fn recursive_compare(
             writeln!(f, "+")?;
             recursive_print(f, depth + 2, k, socc_val)?;
             writeln!(f, "-")?;
-            recursive_print(f, depth + 2, k, rust_val)?;
+            recursive_print(f, depth + 2, k, local_val)?;
         }
     }
     Ok((errors, warnings))
@@ -1271,10 +1271,10 @@ fn parse_int(int: &str) -> Option<u64> {
         .and_then(|s| u64::from_str_radix(s, 16).ok())
 }
 
-fn trust_levels(socc_val: &serde_json::Value, rust_val: &serde_json::Value) -> (usize, usize) {
+fn trust_levels(socc_val: &serde_json::Value, local_val: &serde_json::Value) -> (usize, usize) {
     use serde_json::Value::*;
     let trust_levels = &["context", "cfi", "cfi_scan", "frame_pointer", "scan"];
-    if let (String(s_trust), String(r_trust)) = (socc_val, rust_val) {
+    if let (String(s_trust), String(r_trust)) = (socc_val, local_val) {
         let s_trust_level = trust_levels.iter().position(|x| x == s_trust).unwrap_or(99);
         let r_trust_level = trust_levels.iter().position(|x| x == r_trust).unwrap_or(99);
         (s_trust_level, r_trust_level)
