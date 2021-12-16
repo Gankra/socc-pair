@@ -658,10 +658,11 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     fn write_time<F: Write>(mut f: F, time: Duration) -> std::result::Result<(), std::io::Error> {
         let secs = time.as_secs();
         let subsec_millis = time.subsec_millis();
+        let millis = time.as_millis();
         let mins = secs / 60;
         let submin_secs = secs - (mins * 60);
 
-        writeln!(f, "{:02}m:{:02}s:{:03}ms", mins, submin_secs, subsec_millis)
+        writeln!(f, "{:02}m:{:02}s:{:03}ms ({}ms)", mins, submin_secs, subsec_millis, millis)
     }
 
     if bench_iters == 1 {
