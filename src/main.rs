@@ -418,7 +418,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         .unwrap_or("0")
         .parse::<u64>()
         .expect("bench argument wasn't an integer!");
-    
+
     // Remember if we're benchmarking
     let benching = bench_iters > 0;
     // But ensure there's at least one iteration
@@ -427,7 +427,10 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let mut verbose = matches.value_of("verbose").unwrap();
 
     if benching {
-        writeln!(f, "\nNOTE: setting minidump-stackwalk --verbose to 'error' for benchmarking\n")?;
+        writeln!(
+            f,
+            "\nNOTE: setting minidump-stackwalk --verbose to 'error' for benchmarking\n"
+        )?;
         verbose = "error";
     }
 
@@ -494,7 +497,10 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let no_symbols = matches.is_present("no-symbols");
     let mock_server_url = "http://localhost:3142";
 
-    assert!(!mock_server || !no_symbols, "Are you mocking me??? (--mock-server and --no-symbols can't both be set)");
+    assert!(
+        !mock_server || !no_symbols,
+        "Are you mocking me??? (--mock-server and --no-symbols can't both be set)"
+    );
 
     let mut ignored_fields = HashSet::new();
     if !no_default_ignores {
@@ -532,7 +538,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     //
 
     // Always purge the mock server cache to be safe/consistent.
-    
+
     if mock_server_cache.exists() {
         fs::remove_dir_all(&mock_server_cache)?;
     }
@@ -699,7 +705,6 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     //
     //
 
-
     let mut command_temp = Command::new(&minidump_stackwalk_bin);
     let mut command = &mut command_temp;
 
@@ -770,7 +775,6 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     command = command.arg(&minidump);
 
-
     //
     //
     //
@@ -823,7 +827,6 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             //return Err(());
         }
     }
-
 
     //
     //
@@ -882,19 +885,12 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         if wait4.status.success() {
             writeln!(f, "done! ({}/{})", i, bench_iters)?;
         } else if let Some(code) = wait4.status.code() {
-            writeln!(
-                f,
-                "failed! ({}/{}) exit status: {}",
-                i,
-                bench_iters,
-                code
-            )?;
+            writeln!(f, "failed! ({}/{}) exit status: {}", i, bench_iters, code)?;
         } else {
             writeln!(
                 f,
                 "failed! ({}/{}) (no exit status, terminated by signal?)",
-                i,
-                bench_iters
+                i, bench_iters
             )?;
         }
     }
