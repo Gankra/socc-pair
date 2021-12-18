@@ -7,9 +7,15 @@ This was originally designed to check that rust-minidump was the same (or better
 than the breakpad fork Mozilla was running in production. But since rust-minidump is now
 the production implementation, it's grown into a tool for helping you:
 
-* Dig deeper into the contents of a Firefox crash report (what's the actual value in the minidump?)
-* Debug why rust-minidump produced a particular value (why did the backtrace not use CFI here?)
-* Test and Benchmark local changes against "real" inputs (oops, I accidentally broke this field in the schema!)
+* Dig deeper into the contents of a Firefox crash report 
+  * *What's the actual value in the minidump?*
+  * *Let's test this with a new experimental analysis step!*
+* Debug why rust-minidump produced a particular value 
+  * *Why did the backtrace not use CFI here?*
+  * *Does it produce any warnings for this minidump?*
+* Test and Benchmark local changes against "real" inputs
+  * *Oops, I accidentally broke this field in the schema!*
+  * *Oh hey, it's using 10% less memory in this situation!*
 
 
 ## Usage
