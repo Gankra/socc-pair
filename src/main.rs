@@ -11,6 +11,7 @@ use clap::{crate_version, App, AppSettings, Arg};
 use simplelog::{
     ColorChoice, ConfigBuilder, Level, LevelFilter, TermLogger, TerminalMode, WriteLogger,
 };
+use wait4::Wait4;
 
 error_chain! {
      foreign_links {
@@ -105,6 +106,9 @@ Lets you test symbol-less output.
                     "Repeatedly run minidump-stackwalk, and aggregate the results.
 
 The provided value is the number of iterations to run.
+
+If the value is greater than 1, then all analysis (diffing) and output files
+will be based on the *last* execution.
 
 If --clean is provided, the symbols-cache will be deleted before every run \
 (but other cached files will only be deleted once, at the start.)
@@ -234,12 +238,16 @@ you, don't worry about it, you're probably not doing something that will run afo
                 .takes_value(true)
                 .help("Where to write the output to (if unspecified, stdout is used)"),
         )
+/*
+We basically don't use stderr, only Cargo output goes there,
+so this option is a confusing trap.
         .arg(
             Arg::with_name("log-file")
                 .long("log-file")
                 .takes_value(true)
                 .help("Where to write logs to (if unspecified, stderr is used)"),
         )
+*/
         .arg(
             Arg::with_name("run-local")
                 .long("run-local")
@@ -276,6 +284,28 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
                 ),
         )
         .get_matches();
+
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    /////////////////////////////////////////////////////////////
+    /////////////////// PARSE CLI FLAGS /////////////////////////
+    /////////////////////////////////////////////////////////////
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
 
     let output_file = matches
         .value_of_os("output-file")
@@ -408,9 +438,27 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     let compare_field = matches.value_of("compare");
 
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
     /////////////////////////////////////////////////////////////
-    /////////// ACTUAL EXECUTION STARTS HERE ////////////////////
+    ///////////////// GET FILES FROM SOCORRO ////////////////////
     /////////////////////////////////////////////////////////////
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
 
     // Ensure the dump cache exists (and maybe clear it)
     if clean_cache {
@@ -480,6 +528,28 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         Some(PathBuf::from(raw_json_arg))
     };
 
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    /////////////////////////////////////////////////////////////
+    /////////// GET THE LOCAL MINIDUMP-STACKWALK ////////////////
+    /////////////////////////////////////////////////////////////
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+
     // Process the minidump with local minidump-stackwalk
 
     // Either grab whetever minidump-stackwalk is on PATH or build+run the
@@ -532,6 +602,28 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         command_temp = Command::new("minidump-stackwalk");
         &mut command_temp
     };
+
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    /////////////////////////////////////////////////////////////
+    /////////// CONFIGURE MINIDUMP-STACKWALK ////////////////////
+    /////////////////////////////////////////////////////////////
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
 
     writeln!(f)?;
     writeln!(
@@ -590,48 +682,102 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     command = command.arg(&minidump);
 
-    // Different approaches to forwarding subprocess stdout based on
-    // whether we're writing to a file or not.
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    /////////////////////////////////////////////////////////////
+    ///////////////// RUN MINIDUMP-STACKWALK ////////////////////
+    /////////////////////////////////////////////////////////////
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
 
-    let mut status = None;
+    let mut statuses = vec![];
     let mut times = vec![];
+    let mut mems = vec![];
 
     for i in 0..bench_iters {
         // Start by cleaning out the symbol cache (if needed)
         if clean_cache {
             fs::remove_dir_all(&symbols_cache)?;
         }
+        // But also make sure the parent directories exist!
+        fs::create_dir_all(&symbols_cache)?;
 
-        if output_file.is_some() {
-            let final_command = &mut *command.stdout(Stdio::piped()).stderr(Stdio::inherit());
+        // Reborrow the command so we can rerun it multiple times.
+        let final_command = &mut *command;
 
-            let start = Instant::now();
-            let output = final_command.output()?;
-            let end = Instant::now();
+        // Spawn minidump-stackwalk wait for the process to end.
+        let start = Instant::now();
+        let wait4 = final_command.spawn()?.wait4()?;
+        let end = Instant::now();
 
-            writeln!(f, "{}", String::from_utf8_lossy(&output.stdout))?;
-            status = Some(output.status);
-            times.push(end - start);
-        } else {
-            let final_command = &mut *command;
+        // Record statistics for the run
+        times.push(end - start);
+        mems.push(wait4.rusage.maxrss);
+        statuses.push(wait4.status);
 
-            let start = Instant::now();
-            status = final_command.status().ok();
-            let end = Instant::now();
-
-            times.push(end - start);
-        };
-        if status.unwrap().success() {
+        // Report status
+        if wait4.status.success() {
             writeln!(f, "done! ({}/{})", i + 1, bench_iters)?;
+        } else if let Some(code) = wait4.status.code() {
+            writeln!(
+                f,
+                "failed! ({}/{}) exit status: {}",
+                i + 1,
+                bench_iters,
+                code
+            )?;
         } else {
-            writeln!(f, "failed! ({}/{})", i + 1, bench_iters)?;
+            writeln!(
+                f,
+                "failed! ({}/{}) (no exit status, terminated by signal?)",
+                i + 1,
+                bench_iters
+            )?;
         }
     }
 
-    if status.unwrap().success() {
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    /////////////////////////////////////////////////////////////
+    /////////////////// DIFF THE JSON OUTPUT ////////////////////
+    /////////////////////////////////////////////////////////////
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+
+    if statuses.iter().all(|s| s.success()) {
         writeln!(f, "all done!")?;
 
         if !skip_diff {
+            // Note, only the results of the last run will be used
+            // (we assume they're all equivalent).
             writeln!(f, "comparing json...")?;
             let local_json_file = File::open(&local_output)?;
             let local_json: serde_json::Value =
@@ -640,11 +786,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             compare_crashes(f, compare_field, &ignored_fields, &socc_json, &local_json)?;
         }
     } else {
-        if let Some(code) = status.unwrap().code() {
-            writeln!(f, "failed! exit status: {}", code)?;
-        } else {
-            writeln!(f, "failed! (no exit status, terminated by signal?)")?;
-        }
+        writeln!(f, "some executions failed!")?;
         writeln!(f, "dumping logs: ")?;
 
         let local_log_file = File::open(&local_logs)?;
@@ -653,7 +795,27 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         writeln!(f, "{}", logs)?;
     }
 
-    writeln!(f)?;
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    /////////////////////////////////////////////////////////////
+    ////////////////////// PRINT STATISTICS /////////////////////
+    /////////////////////////////////////////////////////////////
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
 
     fn write_time<F: Write>(mut f: F, time: Duration) -> std::result::Result<(), std::io::Error> {
         let secs = time.as_secs();
@@ -662,40 +824,111 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         let mins = secs / 60;
         let submin_secs = secs - (mins * 60);
 
-        writeln!(f, "{:02}m:{:02}s:{:03}ms ({}ms)", mins, submin_secs, subsec_millis, millis)
+        writeln!(
+            f,
+            "{:02}m:{:02}s:{:03}ms ({}ms)",
+            mins, submin_secs, subsec_millis, millis
+        )
+    }
+
+    fn write_mem<F: Write>(mut f: F, mem: u64) -> std::result::Result<(), std::io::Error> {
+        let mb = mem / (1024 * 1024);
+
+        writeln!(f, "{}MB ({} bytes)", mb, mem)
     }
 
     if bench_iters == 1 {
-        write!(f, "miniump-stackwalk runtime: ")?;
-        write_time(&mut *f, times[0])?;
-    } else {
-        writeln!(f, "benchmark results (ms):")?;
-        write!(f, "  ")?;
-        let mut total_millis = 0;
-        for time in &times {
-            let millis = time.as_millis();
-            write!(f, "{}, ", millis)?;
-            total_millis += time.as_millis();
+        if !times.is_empty() {
+            write!(f, "miniump-stackwalk runtime: ")?;
+            write_time(&mut *f, times[0])?;
         }
-        writeln!(f)?;
+        if !mems.is_empty() {
+            write!(f, "miniump-stackwalk max memory (rss): ")?;
+            write_mem(&mut *f, mems[0])?;
+        }
+    } else {
+        if !times.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "benchmark results (ms):")?;
+            write!(f, "  ")?;
+            let mut total_millis = 0;
+            for time in &times {
+                let millis = time.as_millis();
+                write!(f, "{}, ", millis)?;
+                total_millis += time.as_millis();
+            }
+            writeln!(f)?;
 
-        // Sort to get ordered statistics
-        times.sort();
+            // Sort to get ordered statistics
+            times.sort();
 
-        let average = Duration::from_millis((total_millis / (times.len() as u128)) as u64);
-        let median = times[times.len() / 2];
-        let min = *times.first().unwrap();
-        let max = *times.last().unwrap();
+            let average = Duration::from_millis((total_millis / (times.len() as u128)) as u64);
+            let median = times[times.len() / 2];
+            let min = *times.first().unwrap();
+            let max = *times.last().unwrap();
 
-        write!(f, "average runtime: ")?;
-        write_time(&mut *f, average)?;
-        write!(f, "median runtime: ")?;
-        write_time(&mut *f, median)?;
-        write!(f, "min runtime: ")?;
-        write_time(&mut *f, min)?;
-        write!(f, "max runtime: ")?;
-        write_time(&mut *f, max)?;
+            write!(f, "average runtime: ")?;
+            write_time(&mut *f, average)?;
+            write!(f, "median runtime: ")?;
+            write_time(&mut *f, median)?;
+            write!(f, "min runtime: ")?;
+            write_time(&mut *f, min)?;
+            write!(f, "max runtime: ")?;
+            write_time(&mut *f, max)?;
+        }
+
+        if !mems.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "max memory (rss) results (bytes):")?;
+            write!(f, "  ")?;
+            let mut total_mem: u128 = 0;
+            for &mem in &mems {
+                write!(f, "{}, ", mem)?;
+                total_mem += mem as u128;
+            }
+            writeln!(f)?;
+
+            // Sort to get ordered statistics
+            mems.sort();
+
+            let average = (total_mem / (mems.len() as u128)) as u64;
+            let median = mems[mems.len() / 2];
+            let min = *mems.first().unwrap();
+            let max = *mems.last().unwrap();
+
+            write!(f, "average max-memory: ")?;
+            write_mem(&mut *f, average)?;
+            write!(f, "median max-memory: ")?;
+            write_mem(&mut *f, median)?;
+            write!(f, "min max-memory: ")?;
+            write_mem(&mut *f, min)?;
+            write!(f, "max max-memory: ")?;
+            write_mem(&mut *f, max)?;
+        }
     }
+
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    /////////////////////////////////////////////////////////////
+    ////////////////// PRINT ALL SAVED FILES ////////////////////
+    /////////////////////////////////////////////////////////////
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+
     writeln!(f)?;
     writeln!(f, "Output Files: ")?;
     writeln!(f, "  * (download) Minidump: {}", minidump.display())?;
