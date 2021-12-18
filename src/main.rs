@@ -319,7 +319,6 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         .value_of_os("run-local")
         .map(|os_str| Path::new(os_str).to_owned());
 
-    let verbose = matches.value_of("verbose").unwrap();
     // Verbose configures the child minidump-stackwalk, this app
     // doesn't have significant logging.
     let verbosity = LevelFilter::Warn;
@@ -361,6 +360,24 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             TerminalMode::Stderr,
             ColorChoice::Auto,
         );
+    }
+
+    let bench_iters = matches
+        .value_of("bench")
+        .unwrap_or("0")
+        .parse::<u64>()
+        .expect("bench argument wasn't an integer!");
+    
+    // Remember if we're benchmarking
+    let benching = bench_iters > 0;
+    // But ensure there's at least one iteration
+    let bench_iters = u64::max(bench_iters, 1);
+
+    let mut verbose = matches.value_of("verbose").unwrap();
+
+    if benching {
+        writeln!(f, "\nNOTE: setting minidump-stackwalk --verbose to 'error' for benchmarking\n")?;
+        verbose = "error";
     }
 
     let temp_dir = std::env::temp_dir();
@@ -417,13 +434,6 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let no_default_ignores = matches.is_present("no-default-ignores");
     let clean_cache = matches.is_present("clean-cache");
     let no_symbols = matches.is_present("no-symbols");
-
-    let bench_iters = matches
-        .value_of("bench")
-        .unwrap_or("1")
-        .parse::<u64>()
-        .expect("bench argument wasn't an integer!");
-    assert!(bench_iters > 0, "bench iterations must be at least 1!");
 
     let mut ignored_fields = HashSet::new();
     if !no_default_ignores {
@@ -556,8 +566,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     // given local checkout.
     let mut command_temp;
     let mut command = if let Some(local_checkout) = local_checkout {
-        writeln!(f)?;
-        writeln!(f, "building local minidump-stackwalk...")?;
+        writeln!(f, "\nbuilding local minidump-stackwalk...")?;
 
         let output = Command::new("cargo")
             .current_dir(local_checkout)
@@ -625,12 +634,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     //
     //
 
-    writeln!(f)?;
-    writeln!(
-        f,
-        "running local minidump-stackwalk... ({} times)",
-        bench_iters
-    )?;
+
 
     if let Some(raw_json) = &raw_json {
         let mut arg = OsString::from("--raw-json=");
@@ -704,11 +708,17 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     //
     //
 
+    writeln!(
+        f,
+        "\nrunning local minidump-stackwalk... ({} times)",
+        bench_iters
+    )?;
+
     let mut statuses = vec![];
     let mut times = vec![];
     let mut mems = vec![];
 
-    for i in 0..bench_iters {
+    for i in 1..=bench_iters {
         // Start by cleaning out the symbol cache (if needed)
         if clean_cache {
             fs::remove_dir_all(&symbols_cache)?;
@@ -731,12 +741,12 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
         // Report status
         if wait4.status.success() {
-            writeln!(f, "done! ({}/{})", i + 1, bench_iters)?;
+            writeln!(f, "done! ({}/{})", i, bench_iters)?;
         } else if let Some(code) = wait4.status.code() {
             writeln!(
                 f,
                 "failed! ({}/{}) exit status: {}",
-                i + 1,
+                i,
                 bench_iters,
                 code
             )?;
@@ -744,7 +754,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             writeln!(
                 f,
                 "failed! ({}/{}) (no exit status, terminated by signal?)",
-                i + 1,
+                i,
                 bench_iters
             )?;
         }
@@ -773,7 +783,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     //
 
     if statuses.iter().all(|s| s.success()) {
-        writeln!(f, "all done!")?;
+        writeln!(f, "all done!\n")?;
 
         if !skip_diff {
             // Note, only the results of the last run will be used
@@ -950,6 +960,8 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         "  * Local minidump-stackwalk Logs: {}",
         local_logs.display()
     )?;
+
+    writeln!(f, " ")?;
 
     Ok(())
 }
