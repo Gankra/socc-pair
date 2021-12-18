@@ -90,6 +90,43 @@ This is good to run periodically for data privacy, and for testing 'cold' runs.
                 )
         )
         .arg(
+            Arg::with_name("mock-server")
+                .long("mock-server")
+                .long_help("Run a local symbol-server to test symbol downloading.
+
+NOTE: This partially implies the semantics of --clean-cache! Details below.
+
+This is recommended for benchmarking the symbol download path more reliably
+(and without downloading terabytes of symbol files).
+
+This will introduce an extra (discarded) execution of minidump-stackwalk at the \
+start. The extra execution is run without the mock server to ensure \
+we have all of the symbols our symbol server needs from the *real* servers \
+stored in the symbols-cache.
+
+We then copy the symbols-cache to another directory (see --mock-server-cache) \
+and run a simple static file server for that directory on localhost:3142. \
+At this point, the normal iterations of minidump-stackwalk will begin, but \
+with --symbols-url set to 'localhost:3142'.
+
+Before *every* iteration of minidump-stackwalk (see --bench), we will delete \
+the symbols-cache as if --clean-cache was passed. This is the only way to \
+actually make minidump-stackwalk query our server, while still testing all \
+the code the populates the cache.
+
+The mock-server-cache directory will also be deleted and recreated at the \
+start of socc-pair's execution, just to be safe/consistent. This means every \
+time you run with --mock-server, the *next* run of socc-pair will have to \
+redownload all of its symbol files from the real server.
+
+However mock-server-cache won't be deleted at the end of execution, so you \
+can inspect its contents if you think something weird has happened.
+
+We also don't clear symbols-cache before the 'extra' setup run, so the first time \
+you use --mock-server won't have to redownload symbols if you already have them.\n\n\n"
+                )
+        )
+        .arg(
             Arg::with_name("no-symbols")
                 .long("no-symbols")
                 .long_help("Do not provide any symbols to minidump-stackwalk
@@ -174,6 +211,20 @@ The output of the local minidump-stackwalk will also be saved here, for convenie
 * logs (as $CRASH_ID.log.txt)
 
 socc-pair will output all these paths at the end of its output.\n\n\n",
+                ),
+        )
+        .arg(
+            Arg::with_name("mock-server-cache")
+                .long("mock-server-cache")
+                .takes_value(true)
+                .long_help(
+                    "Where to store the files for the mock symbol server.
+
+Defaults to std::env::temp_dir()/socc-pair/server/
+
+When you use --mock-server we need to copy symbol files out of \
+rust-minidump's cache to our own directory that we can run a \
+simple static file server on -- this is that directory.\n\n\n",
                 ),
         )
         .arg(
@@ -388,6 +439,12 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         .map(|os_str| Path::new(os_str).to_owned())
         .unwrap_or_else(|| temp_dir.join("socc-pair").join("dumps"));
 
+    // Default to env::temp_dir()/socc-pair/server
+    let mock_server_cache = matches
+        .value_of_os("mock-server-cache")
+        .map(|os_str| Path::new(os_str).to_owned())
+        .unwrap_or_else(|| temp_dir.join("socc-pair").join("server"));
+
     // Default to env::temp_dir()/rust-minidump-cache
     let symbols_cache = matches
         .value_of_os("symbols-cache")
@@ -433,7 +490,11 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let skip_diff = matches.is_present("skip-diff");
     let no_default_ignores = matches.is_present("no-default-ignores");
     let clean_cache = matches.is_present("clean-cache");
+    let mock_server = matches.is_present("mock-server");
     let no_symbols = matches.is_present("no-symbols");
+    let mock_server_url = "http://localhost:3142";
+
+    assert!(!mock_server || !no_symbols, "Are you mocking me??? (--mock-server and --no-symbols can't both be set)");
 
     let mut ignored_fields = HashSet::new();
     if !no_default_ignores {
@@ -470,8 +531,15 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     //
     //
 
+    // Always purge the mock server cache to be safe/consistent.
+    
+    if mock_server_cache.exists() {
+        fs::remove_dir_all(&mock_server_cache)?;
+    }
+    fs::create_dir_all(&mock_server_cache)?;
+
     // Ensure the dump cache exists (and maybe clear it)
-    if clean_cache {
+    if clean_cache && dump_cache.exists() {
         fs::remove_dir_all(&dump_cache)?;
     }
     fs::create_dir_all(&dump_cache)?;
@@ -560,12 +628,10 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     //
     //
 
-    // Process the minidump with local minidump-stackwalk
-
     // Either grab whetever minidump-stackwalk is on PATH or build+run the
     // given local checkout.
-    let mut command_temp;
-    let mut command = if let Some(local_checkout) = local_checkout {
+    let minidump_stackwalk_bin = if let Some(local_checkout) = local_checkout {
+        // Build it!
         writeln!(f, "\nbuilding local minidump-stackwalk...")?;
 
         let output = Command::new("cargo")
@@ -605,11 +671,10 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         }
 
         writeln!(f, "built {}", bin)?;
-        command_temp = Command::new(bin);
-        &mut command_temp
+        bin
     } else {
-        command_temp = Command::new("minidump-stackwalk");
-        &mut command_temp
+        // Just use whatever's on PATH
+        "minidump-stackwalk".to_string()
     };
 
     //
@@ -635,6 +700,8 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     //
 
 
+    let mut command_temp = Command::new(&minidump_stackwalk_bin);
+    let mut command = &mut command_temp;
 
     if let Some(raw_json) = &raw_json {
         let mut arg = OsString::from("--raw-json=");
@@ -643,6 +710,23 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     }
 
     if !no_symbols {
+        // The mock server needs a special run of minidump-stackwalk that uses
+        // the real symbol server to get its symbols, but we don't actually need
+        // to configure minidump-stackwalk differently for this run -- we can
+        // just make the mock server its "first choice", which it will cascade
+        // over during the run when the server doesn't exist yet.
+        //
+        // This has the mild side-effect that it will query *both* the mock
+        // server *and* the real server for any symbols that are missing from
+        // the real server. Hopefully that's not significant?
+        //
+        // TODO: maybe this is a bad idea -- the timeout is *really* long.
+        if mock_server {
+            let mut arg = OsString::from("--symbols-url=");
+            arg.push(&mock_server_url);
+            command = command.arg(arg);
+        }
+
         for url in symbols_urls {
             let mut arg = OsString::from("--symbols-url=");
             arg.push(&url);
@@ -686,6 +770,61 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     command = command.arg(&minidump);
 
+
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    /////////////////////////////////////////////////////////////
+    ///////////////// SETUP THE MOCK SERVER /////////////////////
+    /////////////////////////////////////////////////////////////
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+    //
+
+    if mock_server {
+        writeln!(
+            f,
+            "\nrunning local minidump-stackwalk to populate mock-server's symbols...",
+        )?;
+
+        // Run minidump-stackwalk like normal to populate its symbols-cache
+        if clean_cache && symbols_cache.exists() {
+            fs::remove_dir_all(&symbols_cache)?;
+        }
+        fs::create_dir_all(&symbols_cache)?;
+
+        let final_command = &mut *command;
+        let wait4 = final_command.spawn()?.wait4()?;
+
+        if wait4.status.success() {
+            writeln!(f, "done!")?;
+
+            // Now setup the server...
+            unimplemented!("The server hasn't been implemented yet");
+
+            // Copy all files from symbols_cache to mock_server_cache
+
+            // Spin up a simple static file server for mock_server_cache
+            // at mock_server_url
+        } else {
+            writeln!(f, "failed! aborting.")?;
+            //return Err(());
+        }
+    }
+
+
     //
     //
     //
@@ -720,7 +859,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     for i in 1..=bench_iters {
         // Start by cleaning out the symbol cache (if needed)
-        if clean_cache {
+        if (clean_cache || mock_server) && symbols_cache.exists() {
             fs::remove_dir_all(&symbols_cache)?;
         }
         // But also make sure the parent directories exist!
