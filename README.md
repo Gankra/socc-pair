@@ -61,12 +61,12 @@ Note that by default we assume you have rust-minidump's `minidump-stackwalk` bin
 A situation socc-pair is designed for is testing the impact of local changes.
 Here we really flex that ability by having it:
 
-* download a minidump we think is interesting from socorro (default)
+* download a minidump we think is interesting from socorro **(default)**
 * compile and use a local checkout of rust-minidump, to test our changes
-* use mozilla's symbol servers to symbolicate/unwind (default)
-* diff our local results against the value in production (default)
+* use mozilla's symbol servers to symbolicate/unwind **(default)**
+* diff our local results against the value in production **(default)**
 * benchmark our local changes by running minidump-stackwalk repeatedly
-* dump all intermediate results to files so we can debug any issues (default)
+* dump all intermediate results to files so we can debug any issues **(default)**
 * pipe everything to a "diff" file to get syntax highlighting on the report
 
 (Note, by enabling benchmarking we auto-disable the stack unwinder trace logging.
