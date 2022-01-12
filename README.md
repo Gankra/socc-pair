@@ -53,7 +53,7 @@ in a local temporary location (e.g. `/tmp/socc-pair` or `target`).
 * `--skip-diff` - disable json diffing (nice when you're focused on benching).
 * `--no-symbols` - prevent minidump-stackwalk from getting any symbol files, to test that situation.
 * `--mock-server` - create a local symbol server to test networking without killing your internet.
-
+* `--cyborg` - produce both --human and --json output from minidump-stackwalk
 
 
 ## Example Execution
