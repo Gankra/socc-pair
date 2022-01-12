@@ -14,10 +14,10 @@ use simplelog::{
 use wait4::Wait4;
 
 error_chain! {
-     foreign_links {
-         Io(std::io::Error);
-         HttpRequest(reqwest::Error);
-     }
+    foreign_links {
+        Io(std::io::Error);
+        HttpRequest(reqwest::Error);
+    }
 }
 
 #[tokio::main]
@@ -446,18 +446,20 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     }
 
     let temp_dir = std::env::temp_dir();
+    let socc_tmp = temp_dir.join("socc-pair");
+    let install_tmp = socc_tmp.join("install");
 
     // Default to env::temp_dir()/socc-pair/dumps
     let dump_cache = matches
         .value_of_os("socorro-cache")
         .map(|os_str| Path::new(os_str).to_owned())
-        .unwrap_or_else(|| temp_dir.join("socc-pair").join("dumps"));
+        .unwrap_or_else(|| socc_tmp.join("dumps"));
 
     // Default to env::temp_dir()/socc-pair/server
     let mock_server_cache = matches
         .value_of_os("mock-server-cache")
         .map(|os_str| Path::new(os_str).to_owned())
-        .unwrap_or_else(|| temp_dir.join("socc-pair").join("server"));
+        .unwrap_or_else(|| socc_tmp.join("server"));
 
     // Default to env::temp_dir()/rust-minidump-cache
     let symbols_cache = matches
@@ -664,7 +666,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             .output()?;
 
         let output_string = String::from_utf8_lossy(&output.stdout);
-        let mut bin: String = String::new();
+        let mut bin: PathBuf = PathBuf::new();
         for line in output_string.lines() {
             if line.starts_with("{") {
                 let obj: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -683,18 +685,18 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
                         .get("executable")
                         .and_then(|i| i.as_str())
                         .unwrap_or_default()
-                        .to_string();
+                        .to_string()
+                        .into();
                 }
             } else {
                 writeln!(f, "{}", line)?;
             }
         }
 
-        writeln!(f, "built {}", bin)?;
+        writeln!(f, "built {:?}", bin)?;
         bin
     } else {
-        // Just use whatever's on PATH
-        "minidump-stackwalk".to_string()
+        install_bin(f, &install_tmp, "minidump-stackwalk")?
     };
 
     //
@@ -853,59 +855,12 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             fs::rename(&symbols_cache, &mock_server_cache)?;
             fs::create_dir_all(&symbols_cache)?;
 
-            // We use the binary "sfz" to server our files. We need to build this
-            // with `cargo install`, using target/bin-deps as the "root".
-
-            // Build the static file server
-            let build_status = Command::new("cargo")
-                .arg("install")
-                .arg("--root")
-                .arg("target/bin-deps/")
-                .arg("sfz")
-                .status()?;
-
-            if !build_status.success() {
-                writeln!(f, "Could not build local file server")?;
-                panic!();
-            }
-
-            // Then find out the platform-specific binary name by parsing `cargo install --list`
-            let list_command = Command::new("cargo")
-                .arg("install")
-                .arg("--root")
-                .arg("target/bin-deps/")
-                .arg("--list")
-                .output()?;
-
-            if !list_command.status.success() {
-                writeln!(f, "Could not build local file server")?;
-                panic!();
-            }
-
-            let listing = String::from_utf8(list_command.stdout).unwrap();
-            let mut lines = listing.lines();
-            let static_file_server_bin;
-            loop {
-                if let Some(line) = lines.next() {
-                    // looking for a line like "sfz v0.1.6"
-                    if line.starts_with("sfz v") {
-                        // binary name will be on the next line
-                        static_file_server_bin = lines.next().unwrap().trim();
-                        break;
-                    }
-                } else {
-                    writeln!(f, "Could not build local file server")?;
-                    panic!();
-                }
-            }
-
-            // Binary will be in a 'bin' subdirectory of the --root
-            let mut static_file_server_path = PathBuf::from("target/bin-deps/bin/");
-            static_file_server_path.push(static_file_server_bin);
+            // We use the binary "sfz" to server our files.
+            let static_file_server_bin = install_bin(f, &install_tmp, "sfz")?;
 
             // Now finally launch the server, and set up a guard that will
             // kill it when this process exits.
-            let child = Command::new(static_file_server_path)
+            let child = Command::new(static_file_server_bin)
                 .arg("--port")
                 .arg(mock_server_port)
                 .arg(&mock_server_cache)
@@ -1752,4 +1707,80 @@ fn trust_levels(socc_val: &serde_json::Value, local_val: &serde_json::Value) -> 
     } else {
         (99, 99)
     }
+}
+
+/// Build a binary via `cargo install` and return a path to it.
+///
+/// If running a local checkout of socc-pair, binaries will be
+/// installed to target/bin-deps/bin/. Otherwise they will be
+/// installed to the socc-pair temp dir.
+fn install_bin(f: &mut dyn Write, install_tmp: &Path, bin_name: &str) -> Result<PathBuf> {
+    // First check if there's a `target/` dir. If there is, then assume
+    // we're running socc-pair via `cargo run` and `install` into `target/`.
+    // Otherwise, `cargo install` globally.
+    let target_path = Path::new("target/");
+    let install_root = if target_path.is_dir() {
+        Path::new(&"target/bin-deps/")
+    } else {
+        install_tmp
+    };
+    // Build the binary
+    let build_status = Command::new("cargo")
+        .arg("install")
+        .arg("--root")
+        .arg(install_root)
+        .arg(bin_name)
+        .status()?;
+
+    if !build_status.success() {
+        let err = format!(
+            "Could not build {} - build failed {}",
+            bin_name, build_status
+        );
+        writeln!(f, "{}", err)?;
+        return Err(err.into());
+    }
+
+    // Then find out the platform-specific binary name by parsing `cargo install --list`
+    let list_command = Command::new("cargo")
+        .arg("install")
+        .arg("--root")
+        .arg(install_root)
+        .arg("--list")
+        .output()?;
+
+    if !list_command.status.success() {
+        let err = format!(
+            "Could not build {} - binary listing failed {}",
+            bin_name, list_command.status
+        );
+        return Err(err.into());
+    }
+
+    // Format is a simple line-separated listing of all installed binaries
+    let listing = String::from_utf8(list_command.stdout).unwrap();
+    let mut lines = listing.lines();
+    let true_bin_name;
+    let search_string = format!("{} v", bin_name);
+    loop {
+        if let Some(line) = lines.next() {
+            // looking for a line like "sfz v0.1.6"
+            if line.starts_with(&search_string) {
+                // binary name will be on the next line
+                true_bin_name = lines.next().unwrap().trim();
+                break;
+            }
+        } else {
+            let err = format!(
+                "Could not build {} - binary listing did not contain it",
+                bin_name
+            );
+            return Err(err.into());
+        }
+    }
+
+    // Binary will be in a 'bin' subdirectory of the --root
+    let mut path = install_root.join("bin");
+    path.push(true_bin_name);
+    Ok(path)
 }

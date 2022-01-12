@@ -41,8 +41,8 @@ You will need a socorro [API key](https://crash-stats.mozilla.org/api/tokens/) w
 
 If you don't wish to use the second permission, you can set `--raw-json=none` to skip the raw json.
 
-Note that by default we assume you have rust-minidump's `minidump-stackwalk` binary installed on your path 
-(`cargo install minidump-stackwalk`).
+Note that by default we will `cargo install minidump-stackwalk` for you. This will always be done
+in a local temporary location (e.g. `/tmp/socc-pair` or `target`).
 
 ### Notable Optional Arguments
 
@@ -52,7 +52,7 @@ Note that by default we assume you have rust-minidump's `minidump-stackwalk` bin
 * `--clean-cache` - clear all caches, including the symbol cache before each benchmark iteration (careful!).
 * `--skip-diff` - disable json diffing (nice when you're focused on benching).
 * `--no-symbols` - prevent minidump-stackwalk from getting any symbol files, to test that situation.
-* `--mock-server` - (UNDER CONSTRUCTION) create a local symbol server to test networking without killing your internet.
+* `--mock-server` - create a local symbol server to test networking without killing your internet.
 
 
 
