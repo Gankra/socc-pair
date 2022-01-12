@@ -102,7 +102,8 @@ This is recommended for benchmarking the symbol download path more reliably
 This will introduce an extra (discarded) execution of minidump-stackwalk at the \
 start. The extra execution is run without the mock server to ensure \
 we have all of the symbols our symbol server needs from the *real* servers \
-stored in the symbols-cache.
+stored in the symbols-cache. If those symbols are already in the symbols-cache, \
+then they won't be re-downloaded during this process.
 
 We then copy the symbols-cache to another directory (see --mock-server-cache) \
 and run a simple static file server for that directory on localhost:3142. \
@@ -114,16 +115,17 @@ the symbols-cache as if --clean-cache was passed. This is the only way to \
 actually make minidump-stackwalk query our server, while still testing all \
 the code the populates the cache.
 
-The mock-server-cache directory will also be deleted and recreated at the \
-start of socc-pair's execution, just to be safe/consistent. This means every \
-time you run with --mock-server, the *next* run of socc-pair will have to \
-redownload all of its symbol files from the real server.
-
-However mock-server-cache won't be deleted at the end of execution, so you \
+The mock-server-cache directory won't be deleted at the end of execution, so you \
 can inspect its contents if you think something weird has happened.
 
-We also don't clear symbols-cache before the 'extra' setup run, so the first time \
-you use --mock-server won't have to redownload symbols if you already have them.\n\n\n"
+The mock-server-cache directory *will* be deleted and recreated at the \
+*start* of socc-pair's execution, just to be safe/consistent. This \
+*will not* result in all the symbol files needing to be redownloaded from the \
+'real' file-server if you repeatedly use --mock-server, because the symbols-cache \
+will contain all the symbol files used at the end of each execution.
+
+That said, any files that were in the symbol cache but not needed for the current \
+minidump *will* be deleted as a side-effect of this process.\n\n\n"
                 )
         )
         .arg(
@@ -225,6 +227,15 @@ Defaults to std::env::temp_dir()/socc-pair/server/
 When you use --mock-server we need to copy symbol files out of \
 rust-minidump's cache to our own directory that we can run a \
 simple static file server on -- this is that directory.\n\n\n",
+                ),
+        )
+        .arg(
+            Arg::with_name("mock-server-port")
+                .long("mock-server-port")
+                .takes_value(true)
+                .default_value("3142")
+                .long_help(
+                    "The localhost port --mock-server should use.\n\n\n",
                 ),
         )
         .arg(
@@ -495,7 +506,10 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let clean_cache = matches.is_present("clean-cache");
     let mock_server = matches.is_present("mock-server");
     let no_symbols = matches.is_present("no-symbols");
-    let mock_server_url = "http://localhost:3142";
+    let mock_server_port = matches
+        .value_of("mock-server-port")
+        .expect("missing mock server port");
+    let mock_server_url = format!("http://localhost:{}", mock_server_port);
 
     assert!(
         !mock_server || !no_symbols,
@@ -542,7 +556,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     if mock_server_cache.exists() {
         fs::remove_dir_all(&mock_server_cache)?;
     }
-    fs::create_dir_all(&mock_server_cache)?;
+    // Do not create the mock_server_cache, it will be created by renaming the symbol_cache
 
     // Ensure the dump cache exists (and maybe clear it)
     if clean_cache && dump_cache.exists() {
@@ -797,6 +811,16 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     //
     //
 
+    struct ChildGuard {
+        child: std::process::Child,
+    }
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            self.child.kill().unwrap()
+        }
+    }
+    let mut _static_file_server = None;
+
     if mock_server {
         writeln!(
             f,
@@ -814,14 +838,80 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
         if wait4.status.success() {
             writeln!(f, "done!")?;
+            writeln!(
+                f,
+                "Setting up static file server (sfz) at {}",
+                mock_server_url
+            )?;
 
-            // Now setup the server...
-            unimplemented!("The server hasn't been implemented yet");
+            // Copy all files from symbols_cache to mock_server_cache (and recreate an empty symbols cache)
+            fs::create_dir_all(
+                mock_server_cache
+                    .parent()
+                    .expect("why is the mock server cache the root of your file system??"),
+            )?;
+            fs::rename(&symbols_cache, &mock_server_cache)?;
+            fs::create_dir_all(&symbols_cache)?;
 
-            // Copy all files from symbols_cache to mock_server_cache
+            // We use the binary "sfz" to server our files. We need to build this
+            // with `cargo install`, using target/bin-deps as the "root".
 
-            // Spin up a simple static file server for mock_server_cache
-            // at mock_server_url
+            // Build the static file server
+            let build_status = Command::new("cargo")
+                .arg("install")
+                .arg("--root")
+                .arg("target/bin-deps/")
+                .arg("sfz")
+                .status()?;
+
+            if !build_status.success() {
+                writeln!(f, "Could not build local file server")?;
+                panic!();
+            }
+
+            // Then find out the platform-specific binary name by parsing `cargo install --list`
+            let list_command = Command::new("cargo")
+                .arg("install")
+                .arg("--root")
+                .arg("target/bin-deps/")
+                .arg("--list")
+                .output()?;
+
+            if !list_command.status.success() {
+                writeln!(f, "Could not build local file server")?;
+                panic!();
+            }
+
+            let listing = String::from_utf8(list_command.stdout).unwrap();
+            let mut lines = listing.lines();
+            let static_file_server_bin;
+            loop {
+                if let Some(line) = lines.next() {
+                    // looking for a line like "sfz v0.1.6"
+                    if line.starts_with("sfz v") {
+                        // binary name will be on the next line
+                        static_file_server_bin = lines.next().unwrap().trim();
+                        break;
+                    }
+                } else {
+                    writeln!(f, "Could not build local file server")?;
+                    panic!();
+                }
+            }
+
+            // Binary will be in a 'bin' subdirectory of the --root
+            let mut static_file_server_path = PathBuf::from("target/bin-deps/bin/");
+            static_file_server_path.push(static_file_server_bin);
+
+            // Now finally launch the server, and set up a guard that will
+            // kill it when this process exits.
+            let child = Command::new(static_file_server_path)
+                .arg("--port")
+                .arg(mock_server_port)
+                .arg(&mock_server_cache)
+                .spawn()
+                .expect("could not spawn static file server");
+            _static_file_server = Some(ChildGuard { child });
         } else {
             writeln!(f, "failed! aborting.")?;
             //return Err(());
