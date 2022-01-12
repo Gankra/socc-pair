@@ -2,7 +2,7 @@
 name = "socc-pair"
 description = "compares local minidump-stackwalk output to socorro (crash-stats.mozilla.org)"
 license = "MIT"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -16,4 +16,4 @@ tokio =  { version = "1.12.0", features = ["full"] }
 simplelog = "0.10.2"
 clap = "2.33"
 log = "0.4"
-wait4 = "*"
+wait4 = "0.1.3"
