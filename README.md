@@ -1,7 +1,7 @@
 # socc-pair
 
 A test harness for testing, debugging, and benchmarking rust-minidump's minidump-stackwalk,
-and Firefox crash reports.
+specifically optimized for Firefox crash reports.
 
 This was originally designed to check that rust-minidump was the same (or better) output
 than the breakpad fork Mozilla was running in production. But since rust-minidump is now
@@ -21,24 +21,32 @@ the production implementation, it's grown into a tool for helping you:
 ## Usage
 
 ```
-socc-pair --api-token=YOUR_TOKEN --crash-id=SOME_CRASH_ID
-
-OR
-
 socc-pair --minidump=/path/to/minidump.dmp
+
+or for mozilla crash reports:
+socc-pair --api-token=YOUR_TOKEN --crash-id=SOME_CRASH_ID
 ```
 
 e.g.
 
 ```
-socc-pair --api-token=f0c129d4467bf58eeca0ad8e8e5d --crash-id=cd121a28-ca2b-48c2-a0d4-a71a40210915
-
-OR
-
 socc-pair --minidump=C:\wow\cool\minidump.dmp
+
+or for mozilla crash reports:
+socc-pair --api-token=f0c129d4467bf58eeca0ad8e8e5d --crash-id=cd121a28-ca2b-48c2-a0d4-a71a40210915
 ```
 
-This will produce a kind-of-diff of the two json files, but with more intelligent domain-specific
+This will automate running minidump-stackwalk on the given minidump, and produce a detailed report
+of the execution.
+
+Note that by default we will `cargo install minidump-stackwalk` for you. This will always be done
+in a local temporary location (e.g. `/tmp/socc-pair` or `target`). See `--run-local` for an alternative.
+
+## Mozilla Socorro (crash-stats.mozilla.org) Integration
+
+This section covers the socorro mode (`--crash-id=... --api-token=...`).
+
+Socorro mode will produce a kind-of-diff of the two json files, but with more intelligent domain-specific
 analysis. At the end of the output, you will get a final count of errors and warnings, as well
 as paths to all the different input/output files used.
 
@@ -48,9 +56,6 @@ You will need a socorro [API key](https://crash-stats.mozilla.org/api/tokens/) w
 * "View Personal Identifiable Information" (to read some entries in raw-json)
 
 If you don't wish to use the second permission, you can set `--raw-json=none` to skip the raw json.
-
-Note that by default we will `cargo install minidump-stackwalk` for you. This will always be done
-in a local temporary location (e.g. `/tmp/socc-pair` or `target`).
 
 ### Notable Optional Arguments
 
