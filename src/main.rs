@@ -67,6 +67,7 @@ debugging fields:
   * symbol_url
   * loaded_symbols
   * symbol_fetch_time
+  * stackwalk_version
 
 A warning will still be emitted for ignored fields. This is useful for deprecated fields \
 which you don't care about the value of, or fields which contain redundant data like
@@ -501,6 +502,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         "symbol_url",
         "loaded_symbols",
         "symbol_fetch_time",
+        "stackwalk_version",
     ];
 
     let skip_diff = matches.is_present("skip-diff");
@@ -696,7 +698,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         writeln!(f, "built {:?}", bin)?;
         bin
     } else {
-        install_bin(f, &install_tmp, "minidump-stackwalk")?
+        install_bin(f, &install_tmp, "minidump-stackwalk", ">= 0.9.6")?
     };
 
     //
@@ -856,7 +858,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             fs::create_dir_all(&symbols_cache)?;
 
             // We use the binary "sfz" to server our files.
-            let static_file_server_bin = install_bin(f, &install_tmp, "sfz")?;
+            let static_file_server_bin = install_bin(f, &install_tmp, "sfz", "=0.6.2")?;
 
             // Now finally launch the server, and set up a guard that will
             // kill it when this process exits.
@@ -1714,7 +1716,12 @@ fn trust_levels(socc_val: &serde_json::Value, local_val: &serde_json::Value) -> 
 /// If running a local checkout of socc-pair, binaries will be
 /// installed to target/bin-deps/bin/. Otherwise they will be
 /// installed to the socc-pair temp dir.
-fn install_bin(f: &mut dyn Write, install_tmp: &Path, bin_name: &str) -> Result<PathBuf> {
+fn install_bin(
+    f: &mut dyn Write,
+    install_tmp: &Path,
+    bin_name: &str,
+    version: &str,
+) -> Result<PathBuf> {
     // First check if there's a `target/` dir. If there is, then assume
     // we're running socc-pair via `cargo run` and `install` into `target/`.
     // Otherwise, `cargo install` globally.
@@ -1729,6 +1736,8 @@ fn install_bin(f: &mut dyn Write, install_tmp: &Path, bin_name: &str) -> Result<
         .arg("install")
         .arg("--root")
         .arg(install_root)
+        .arg("--version")
+        .arg(version)
         .arg(bin_name)
         .status()?;
 
