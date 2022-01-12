@@ -190,10 +190,10 @@ If no value is provided, the whole json will be compared.
                     "An input JSON file with the extra information.
 
 Possible values:
-* 'socorro' (default) - Get the 'raw' JSON from socorro 
-  (API token may require 'View Personal Identifiable Information') 
+* 'default' - 'socorro' if using socorro (--crash-id), 'none' otherwise
 * 'none' - Do not use a raw-json
-* 'default' - 'socorro' is using socorro, 'none' otherwise
+* 'socorro' - Get the 'raw' JSON from socorro 
+  (API token may require 'View Personal Identifiable Information') 
 * <anything else> - assumed to be a path to a local raw-json file
 
 This is a gross hack for some legacy side-channel information that mozilla uses. It will \
