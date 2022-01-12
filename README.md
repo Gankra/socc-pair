@@ -22,12 +22,20 @@ the production implementation, it's grown into a tool for helping you:
 
 ```
 socc-pair --api-token=YOUR_TOKEN --crash-id=SOME_CRASH_ID
+
+OR
+
+socc-pair --minidump=/path/to/minidump.dmp
 ```
 
 e.g.
 
 ```
 socc-pair --api-token=f0c129d4467bf58eeca0ad8e8e5d --crash-id=cd121a28-ca2b-48c2-a0d4-a71a40210915
+
+OR
+
+socc-pair --minidump=C:\wow\cool\minidump.dmp
 ```
 
 This will produce a kind-of-diff of the two json files, but with more intelligent domain-specific

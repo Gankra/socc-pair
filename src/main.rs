@@ -184,7 +184,7 @@ If no value is provided, the whole json will be compared.
         .arg(
             Arg::with_name("raw-json")
                 .long("raw-json")
-                .default_value("socorro")
+                .default_value("default")
                 .takes_value(true)
                 .long_help(
                     "An input JSON file with the extra information.
@@ -193,6 +193,7 @@ Possible values:
 * 'socorro' (default) - Get the 'raw' JSON from socorro 
   (API token may require 'View Personal Identifiable Information') 
 * 'none' - Do not use a raw-json
+* 'default' - 'socorro' is using socorro, 'none' otherwise
 * <anything else> - assumed to be a path to a local raw-json file
 
 This is a gross hack for some legacy side-channel information that mozilla uses. It will \
@@ -332,7 +333,6 @@ so this option is a confusing trap.
             Arg::with_name("api-token")
                 .long("api-token")
                 .takes_value(true)
-                .required(true)
                 .long_help(
                     "A socorro api token to use for getting minidumps
 
@@ -345,10 +345,17 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
                 ),
         )
         .arg(
+            Arg::with_name("minidump")
+                .long("minidump")
+                .takes_value(true)
+                .long_help(
+                    "A local minidump to analyze (instead of using --api-token and --crash-id) \n\n\n",
+                ),
+        )
+        .arg(
             Arg::with_name("crash-id")
                 .long("crash-id")
                 .takes_value(true)
-                .required(true)
                 .long_help(
                     "The socorro crash id to analyze.\n\n",
                 ),
@@ -488,9 +495,57 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     let raw_json_arg = matches.value_of_os("raw-json").expect("Missing raw json");
 
-    let api_token = matches.value_of("api-token").expect("Missing API token");
+    let api_token = matches.value_of("api-token");
+    let crash_id = matches.value_of("crash-id");
+    let local_minidump = matches.value_of("minidump").map(|path| PathBuf::from(path));
 
-    let crash_id = matches.value_of("crash-id").expect("Missing crash-id");
+    let using_socorro = api_token.is_some() && crash_id.is_some();
+    let trying_to_use_socorro = api_token.is_some() || crash_id.is_some();
+    let using_local_minidump = local_minidump.is_some();
+
+    if using_local_minidump && trying_to_use_socorro {
+        let err = "--minidump is incompatible with --api-token and --crash-id".to_string();
+        eprintln!("ERROR: {}\n", err);
+        return Err(err.into());
+    }
+
+    if !using_socorro && trying_to_use_socorro {
+        let err = "--api-token and --crash-id must be used together".to_string();
+        eprintln!("ERROR: {}\n", err);
+        return Err(err.into());
+    }
+
+    let _local_minidump_str;
+    let crash_id = if let Some(crash_id) = crash_id {
+        // using socorro
+        crash_id
+    } else {
+        // using local
+        _local_minidump_str = local_minidump
+            .as_ref()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        &_local_minidump_str
+    };
+
+    let raw_json_arg = if raw_json_arg == OsStr::new("default") {
+        if using_local_minidump {
+            OsStr::new("none")
+        } else {
+            OsStr::new("socorro")
+        }
+    } else {
+        raw_json_arg
+    };
+
+    if !using_socorro && raw_json_arg == OsStr::new("socorro") {
+        let err = "--raw-json=socorro requires socorro (--crash-id)".to_string();
+        eprintln!("ERROR: {}\n", err);
+        return Err(err.into());
+    }
 
     let default_ignored_fields = [
         // deprecated
@@ -593,32 +648,48 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let mut local_logs = dump_cache.join(&crash_id);
     local_logs.set_extension("log.txt");
 
-    // Download the minidump
-    let minidump_req = reqwest::Client::new()
-        .get("https://crash-stats.mozilla.org/api/RawCrash/")
-        .header("Auth-Token", api_token)
-        .query(&[
-            ("crash_id", crash_id),
-            ("format", "raw"),
-            ("name", "upload_file_minidump"),
-        ]);
+    let minidump = if let Some(api_token) = &api_token {
+        let mut minidump_dest = dump_cache.join(&crash_id);
+        minidump_dest.set_extension("dmp");
 
-    let mut minidump = dump_cache.join(&crash_id);
-    minidump.set_extension("dmp");
+        // Download the minidump
+        let minidump_req = reqwest::Client::new()
+            .get("https://crash-stats.mozilla.org/api/RawCrash/")
+            .header("Auth-Token", *api_token)
+            .query(&[
+                ("crash_id", crash_id),
+                ("format", "raw"),
+                ("name", "upload_file_minidump"),
+            ]);
 
-    fetch(f, minidump_req, &minidump).await?;
+        fetch(f, minidump_req, &minidump_dest).await?;
 
-    // Download the json socorro has for the minidump
-    let socc_output_req = reqwest::Client::new()
-        .get("https://crash-stats.mozilla.org/api/ProcessedCrash/")
-        .header("Auth-Token", api_token)
-        .query(&[("crash_id", crash_id)]);
-    let mut socc_output = dump_cache.join(&crash_id);
-    socc_output.set_extension("json");
+        minidump_dest
+    } else {
+        local_minidump.unwrap()
+    };
 
-    let socc_json = fetch(f, socc_output_req, &socc_output).await?;
-    let socc_json: serde_json::Value = serde_json::from_reader(BufReader::new(socc_json)).unwrap();
-    let socc_json = socc_json.get("json_dump").unwrap();
+    let mut socc_output = None;
+    let mut socc_json = None;
+    let tmp_socc_json2: serde_json::Value;
+
+    if let Some(api_token) = &api_token {
+        // Download the json socorro has for the minidump
+        let socc_output_req = reqwest::Client::new()
+            .get("https://crash-stats.mozilla.org/api/ProcessedCrash/")
+            .header("Auth-Token", *api_token)
+            .query(&[("crash_id", crash_id)]);
+        let mut tmp_socc_output = dump_cache.join(&crash_id);
+        tmp_socc_output.set_extension("json");
+
+        if !skip_diff {
+            let tmp_socc_json1 = fetch(f, socc_output_req, &tmp_socc_output).await?;
+            tmp_socc_json2 = serde_json::from_reader(BufReader::new(tmp_socc_json1)).unwrap();
+
+            socc_json = tmp_socc_json2.get("json_dump");
+        }
+        socc_output = Some(tmp_socc_output);
+    }
 
     // Get the "raw" json file with things like certificate info
     let raw_json = if raw_json_arg == OsStr::new("none") {
@@ -628,7 +699,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         // Download the raw json from socorro
         let extra_json_req = reqwest::Client::new()
             .get("https://crash-stats.mozilla.org/api/RawCrash/")
-            .header("Auth-Token", api_token)
+            .header("Auth-Token", api_token.unwrap())
             .query(&[("crash_id", crash_id)]);
         let mut extra_json_path = dump_cache.join(&crash_id);
         extra_json_path.set_extension("raw.json");
@@ -1002,7 +1073,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     if statuses.iter().all(|s| s.success()) {
         writeln!(f, "all done!\n")?;
 
-        if !skip_diff {
+        if let Some(socc_json) = &socc_json {
             // Note, only the results of the last run will be used
             // (we assume they're all equivalent).
             writeln!(f, "comparing json...")?;
@@ -1158,24 +1229,30 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
     writeln!(f)?;
     writeln!(f, "Output Files: ")?;
-    writeln!(f, "  * (download) Minidump: {}", minidump.display())?;
-    writeln!(
-        f,
-        "  * (download) Socorro Processed Crash: {}",
-        socc_output.display()
-    )?;
+    if using_local_minidump {
+        writeln!(f, "  * Minidump: {}", minidump.display())?;
+    } else {
+        writeln!(f, "  * (download) Minidump: {}", minidump.display())?;
+    }
+    if let Some(socc_output) = &socc_output {
+        writeln!(
+            f,
+            "  * (download) Socorro Processed Crash: {}",
+            socc_output.display()
+        )?;
+    }
     if let Some(raw_json) = &raw_json {
         writeln!(f, "  * (download) Raw JSON: {}", raw_json.display())?;
     }
     writeln!(
         f,
-        "  * Local minidump-stackwalk json Output: {}",
+        "  * Local minidump-stackwalk --json Output: {}",
         local_json_output.display()
     )?;
     if cyborg {
         writeln!(
             f,
-            "  * Local minidump-stackwalk human Output: {}",
+            "  * Local minidump-stackwalk --human Output: {}",
             local_human_output.display()
         )?;
     }
