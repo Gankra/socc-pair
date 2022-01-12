@@ -82,6 +82,13 @@ the length of an array.\n\n\n",
                 )
         )
         .arg(
+            Arg::with_name("cyborg")
+                .long("cyborg")
+                .long_help(
+                    "Produce both --human and --json output for minidump-stackwalk"
+                )
+        )
+        .arg(
             Arg::with_name("clean-cache")
                 .long("clean-cache")
                 .long_help("Delete all cached files before running.
@@ -510,6 +517,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let clean_cache = matches.is_present("clean-cache");
     let mock_server = matches.is_present("mock-server");
     let no_symbols = matches.is_present("no-symbols");
+    let cyborg = matches.is_present("cyborg");
     let mock_server_port = matches
         .value_of("mock-server-port")
         .expect("missing mock server port");
@@ -560,7 +568,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     if mock_server_cache.exists() {
         fs::remove_dir_all(&mock_server_cache)?;
     }
-    // Do not create the mock_server_cache, it will be created by renaming the symbol_cache
+    fs::create_dir_all(&mock_server_cache)?;
 
     // Ensure the dump cache exists (and maybe clear it)
     if clean_cache && dump_cache.exists() {
@@ -572,11 +580,15 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     // * minidump (the minidump to analyze)
     // * socc_output (socorro processed crash)
     // * raw_json ("raw" json file)
-    // * local_output (local minidump-stackwalk output)
+    // * local_json_output (local minidump-stackwalk --json output)
+    // * local_human_output (local minidump-stackwalk --human output)
     // * local_logs (local minidump-stackwalk log output)
 
-    let mut local_output = dump_cache.join(&crash_id);
-    local_output.set_extension("local.json");
+    let mut local_json_output = dump_cache.join(&crash_id);
+    local_json_output.set_extension("local.json");
+
+    let mut local_human_output = dump_cache.join(&crash_id);
+    local_human_output.set_extension("local.txt");
 
     let mut local_logs = dump_cache.join(&crash_id);
     local_logs.set_extension("log.txt");
@@ -769,9 +781,19 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         }
     }
 
-    {
+    if cyborg {
+        let mut arg = OsString::from("--cyborg=");
+        arg.push(&local_json_output);
+        command = command.arg(arg);
+
         let mut arg = OsString::from("--output-file=");
-        arg.push(&local_output);
+        arg.push(&local_human_output);
+        command = command.arg(arg);
+    } else {
+        command = command.arg("--json");
+
+        let mut arg = OsString::from("--output-file=");
+        arg.push(&local_json_output);
         command = command.arg(arg);
     }
 
@@ -788,7 +810,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     }
 
     {
-        command = command.arg("--json");
+        command = command.arg("--pretty");
     }
 
     command = command.arg(&minidump);
@@ -825,11 +847,35 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     }
     let mut _static_file_server = None;
 
+    {
+        writeln!(
+            f,
+            "Setting up static file server (sfz) at {}",
+            mock_server_url
+        )?;
+
+        // We use the binary "sfz" to server our files.
+        let static_file_server_bin = install_bin(f, &install_tmp, "sfz", "=0.6.2")?;
+
+        // Now finally launch the server, and set up a guard that will
+        // kill it when this process exits.
+        let child = Command::new(static_file_server_bin)
+            .arg("--port")
+            .arg(mock_server_port)
+            .arg(&mock_server_cache)
+            .spawn()
+            .expect("could not spawn static file server");
+        _static_file_server = Some(ChildGuard { child });
+    }
+
     if mock_server {
         writeln!(
             f,
             "\nrunning local minidump-stackwalk to populate mock-server's symbols...",
         )?;
+        if output_file.is_some() {
+            eprintln!("\nrunning local minidump-stackwalk to populate mock-server's symbols...");
+        }
 
         // Run minidump-stackwalk like normal to populate its symbols-cache
         if clean_cache && symbols_cache.exists() {
@@ -842,13 +888,9 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
 
         if wait4.status.success() {
             writeln!(f, "done!")?;
-            writeln!(
-                f,
-                "Setting up static file server (sfz) at {}",
-                mock_server_url
-            )?;
 
             // Copy all files from symbols_cache to mock_server_cache (and recreate an empty symbols cache)
+            fs::remove_dir_all(&mock_server_cache)?;
             fs::create_dir_all(
                 mock_server_cache
                     .parent()
@@ -856,19 +898,6 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             )?;
             fs::rename(&symbols_cache, &mock_server_cache)?;
             fs::create_dir_all(&symbols_cache)?;
-
-            // We use the binary "sfz" to server our files.
-            let static_file_server_bin = install_bin(f, &install_tmp, "sfz", "=0.6.2")?;
-
-            // Now finally launch the server, and set up a guard that will
-            // kill it when this process exits.
-            let child = Command::new(static_file_server_bin)
-                .arg("--port")
-                .arg(mock_server_port)
-                .arg(&mock_server_cache)
-                .spawn()
-                .expect("could not spawn static file server");
-            _static_file_server = Some(ChildGuard { child });
         } else {
             writeln!(f, "failed! aborting.")?;
             //return Err(());
@@ -902,6 +931,12 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         "\nrunning local minidump-stackwalk... ({} times)",
         bench_iters
     )?;
+    if output_file.is_some() {
+        eprintln!(
+            "\nrunning local minidump-stackwalk... ({} times)",
+            bench_iters
+        );
+    }
 
     let mut statuses = vec![];
     let mut times = vec![];
@@ -971,7 +1006,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             // Note, only the results of the last run will be used
             // (we assume they're all equivalent).
             writeln!(f, "comparing json...")?;
-            let local_json_file = File::open(&local_output)?;
+            let local_json_file = File::open(&local_json_output)?;
             let local_json: serde_json::Value =
                 serde_json::from_reader(BufReader::new(local_json_file)).unwrap();
 
@@ -1134,9 +1169,16 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     }
     writeln!(
         f,
-        "  * Local minidump-stackwalk Output: {}",
-        local_output.display()
+        "  * Local minidump-stackwalk json Output: {}",
+        local_json_output.display()
     )?;
+    if cyborg {
+        writeln!(
+            f,
+            "  * Local minidump-stackwalk human Output: {}",
+            local_human_output.display()
+        )?;
+    }
     writeln!(
         f,
         "  * Local minidump-stackwalk Logs: {}",
