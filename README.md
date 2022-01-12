@@ -177,7 +177,7 @@ Output Files:
   * (download) Minidump: C:\Users\gankra\AppData\Local\Temp\socc-pair\dumps\b4f58e9f-49be-4ba5-a203-8ef160211027.dmp
   * (download) Socorro Processed Crash: C:\Users\gankra\AppData\Local\Temp\socc-pair\dumps\b4f58e9f-49be-4ba5-a203-8ef160211027.json
   * (download) Raw JSON: C:\Users\gankra\AppData\Local\Temp\socc-pair\dumps\b4f58e9f-49be-4ba5-a203-8ef160211027.raw.json
-  * Local minidump-stackwalk Output: C:\Users\gankra\AppData\Local\Temp\socc-pair\dumps\b4f58e9f-49be-4ba5-a203-8ef160211027.local.json
+  * Local minidump-stackwalk --json Output: C:\Users\gankra\AppData\Local\Temp\socc-pair\dumps\b4f58e9f-49be-4ba5-a203-8ef160211027.local.json
   * Local minidump-stackwalk Logs: C:\Users\gankra\AppData\Local\Temp\socc-pair\dumps\b4f58e9f-49be-4ba5-a203-8ef160211027.log.txt
 
 ``` 
