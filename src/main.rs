@@ -182,8 +182,8 @@ If no value is provided, the whole json will be compared.
                 ),
         )
         .arg(
-            Arg::with_name("raw-json")
-                .long("raw-json")
+            Arg::with_name("evil-json")
+                .long("evil-json")
                 .default_value("default")
                 .takes_value(true)
                 .long_help(
@@ -191,10 +191,10 @@ If no value is provided, the whole json will be compared.
 
 Possible values:
 * 'default' - 'socorro' if using socorro (--crash-id), 'none' otherwise
-* 'none' - Do not use a raw-json
+* 'none' - Do not use an evil-json
 * 'socorro' - Get the 'raw' JSON from socorro 
   (API token may require 'View Personal Identifiable Information') 
-* <anything else> - assumed to be a path to a local raw-json file
+* <anything else> - assumed to be a path to a local evil-json file
 
 This is a gross hack for some legacy side-channel information that mozilla uses. It will \
 hopefully be phased out and deprecated in favour of just using custom streams in the \
@@ -339,7 +339,7 @@ so this option is a confusing trap.
 Required permissions:
 
 * 'View Raw Dumps' (hard required)
-* 'View Personal Identifiable Information' (to read some entries in raw-json)
+* 'View Personal Identifiable Information' (to read some entries in raw-json/evil-json)
 
 See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
                 ),
@@ -493,7 +493,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         .map(|v| v.map(String::from).collect::<Vec<_>>())
         .unwrap_or_else(Vec::new);
 
-    let raw_json_arg = matches.value_of_os("raw-json").expect("Missing raw json");
+    let evil_json_arg = matches.value_of_os("evil-json").expect("Missing evil json");
 
     let api_token = matches.value_of("api-token");
     let crash_id = matches.value_of("crash-id");
@@ -531,18 +531,18 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         &_local_minidump_str
     };
 
-    let raw_json_arg = if raw_json_arg == OsStr::new("default") {
+    let evil_json_arg = if evil_json_arg == OsStr::new("default") {
         if using_local_minidump {
             OsStr::new("none")
         } else {
             OsStr::new("socorro")
         }
     } else {
-        raw_json_arg
+        evil_json_arg
     };
 
-    if !using_socorro && raw_json_arg == OsStr::new("socorro") {
-        let err = "--raw-json=socorro requires socorro (--crash-id)".to_string();
+    if !using_socorro && evil_json_arg == OsStr::new("socorro") {
+        let err = "--evil-json=socorro requires socorro (--crash-id)".to_string();
         eprintln!("ERROR: {}\n", err);
         return Err(err.into());
     }
@@ -634,7 +634,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     // output paths to report:
     // * minidump (the minidump to analyze)
     // * socc_output (socorro processed crash)
-    // * raw_json ("raw" json file)
+    // * evil_json ("extra" json file AKA evil-json)
     // * local_json_output (local minidump-stackwalk --json output)
     // * local_human_output (local minidump-stackwalk --human output)
     // * local_logs (local minidump-stackwalk log output)
@@ -692,17 +692,17 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     }
 
     // Get the "raw" json file with things like certificate info
-    let raw_json = if raw_json_arg == OsStr::new("none") {
+    let evil_json = if evil_json_arg == OsStr::new("none") {
         // Don't use raw json
         None
-    } else if raw_json_arg == OsStr::new("socorro") {
+    } else if evil_json_arg == OsStr::new("socorro") {
         // Download the raw json from socorro
         let extra_json_req = reqwest::Client::new()
             .get("https://crash-stats.mozilla.org/api/RawCrash/")
             .header("Auth-Token", api_token.unwrap())
             .query(&[("crash_id", crash_id)]);
         let mut extra_json_path = dump_cache.join(&crash_id);
-        extra_json_path.set_extension("raw.json");
+        extra_json_path.set_extension("evil.json");
 
         // Just need it on disk for rust-minidump, don't actually need the value here.
         let _extra_json = fetch(f, extra_json_req, &extra_json_path).await?;
@@ -710,7 +710,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         Some(extra_json_path)
     } else {
         // Assume --raw-json is a local path
-        Some(PathBuf::from(raw_json_arg))
+        Some(PathBuf::from(evil_json_arg))
     };
 
     //
@@ -784,6 +784,21 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         install_bin(f, &install_tmp, "minidump-stackwalk", ">= 0.9.6")?
     };
 
+    let mdsw_version = {
+        let output = Command::new(&minidump_stackwalk_bin)
+            .arg("-V")
+            .output()?
+            .stdout;
+        let output_str = std::str::from_utf8(&output)
+            .expect("minidump-stackwalk -V wasn't utf8??")
+            .trim();
+        let (name, version) = output_str
+            .split_once(' ')
+            .expect("Couldn't parse minidump-stackwalk version");
+        assert_eq!(name, "minidump-stackwalk");
+        semver::Version::parse(version).expect("Could not parse minidump-stackwalk version")
+    };
+
     //
     //
     //
@@ -809,9 +824,13 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let mut command_temp = Command::new(&minidump_stackwalk_bin);
     let mut command = &mut command_temp;
 
-    if let Some(raw_json) = &raw_json {
-        let mut arg = OsString::from("--raw-json=");
-        arg.push(&raw_json);
+    if let Some(evil_json) = &evil_json {
+        let mut arg = if mdsw_version >= semver::Version::parse("0.10.0").unwrap() {
+            OsString::from("--evil-json=")
+        } else {
+            OsString::from("--raw-json=")
+        };
+        arg.push(&evil_json);
         command = command.arg(arg);
     }
 
@@ -1241,8 +1260,8 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
             socc_output.display()
         )?;
     }
-    if let Some(raw_json) = &raw_json {
-        writeln!(f, "  * (download) Raw JSON: {}", raw_json.display())?;
+    if let Some(evil_json) = &evil_json {
+        writeln!(f, "  * (download) Evil JSON: {}", evil_json.display())?;
     }
     writeln!(
         f,
