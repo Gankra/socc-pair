@@ -192,7 +192,7 @@ If no value is provided, the whole json will be compared.
 Possible values:
 * 'default' - 'socorro' if using socorro (--crash-id), 'none' otherwise
 * 'none' - Do not use an evil-json
-* 'socorro' - Get the 'raw' JSON from socorro 
+* 'socorro' - Get the 'raw' JSON from socorro
   (API token may require 'View Personal Identifiable Information') 
 * <anything else> - assumed to be a path to a local evil-json file
 
@@ -499,24 +499,19 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let crash_id = matches.value_of("crash-id");
     let local_minidump = matches.value_of("minidump").map(|path| PathBuf::from(path));
 
-    let using_socorro = api_token.is_some() && crash_id.is_some();
-    let trying_to_use_socorro = api_token.is_some() || crash_id.is_some();
+    let using_socorro_for_json = crash_id.is_some();
     let using_local_minidump = local_minidump.is_some();
+    let using_socorro_for_minidump =
+        !using_local_minidump && crash_id.is_some() && api_token.is_some();
 
-    if using_local_minidump && trying_to_use_socorro {
-        let err = "--minidump is incompatible with --api-token and --crash-id".to_string();
-        eprintln!("ERROR: {}\n", err);
-        return Err(err.into());
-    }
-
-    if !using_socorro && trying_to_use_socorro {
-        let err = "--api-token and --crash-id must be used together".to_string();
+    if !using_local_minidump && !using_socorro_for_minidump {
+        let err = "Need a minidump, either from --minidump or from socorro. To get the minidump from socorro, --api-token and --crash-id must be used together".to_string();
         eprintln!("ERROR: {}\n", err);
         return Err(err.into());
     }
 
     let _local_minidump_str;
-    let crash_id = if let Some(crash_id) = crash_id {
+    let crash_id_or_filename = if let Some(crash_id) = crash_id {
         // using socorro
         crash_id
     } else {
@@ -541,7 +536,7 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         evil_json_arg
     };
 
-    if !using_socorro && evil_json_arg == OsStr::new("socorro") {
+    if !using_socorro_for_json && evil_json_arg == OsStr::new("socorro") {
         let err = "--evil-json=socorro requires socorro (--crash-id)".to_string();
         eprintln!("ERROR: {}\n", err);
         return Err(err.into());
@@ -639,23 +634,25 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     // * local_human_output (local minidump-stackwalk --human output)
     // * local_logs (local minidump-stackwalk log output)
 
-    let mut local_json_output = dump_cache.join(&crash_id);
+    let mut local_json_output = dump_cache.join(&crash_id_or_filename);
     local_json_output.set_extension("local.json");
 
-    let mut local_human_output = dump_cache.join(&crash_id);
+    let mut local_human_output = dump_cache.join(&crash_id_or_filename);
     local_human_output.set_extension("local.txt");
 
-    let mut local_logs = dump_cache.join(&crash_id);
+    let mut local_logs = dump_cache.join(&crash_id_or_filename);
     local_logs.set_extension("log.txt");
 
-    let minidump = if let Some(api_token) = &api_token {
+    let minidump = if using_socorro_for_minidump {
+        let api_token = api_token.unwrap();
+        let crash_id = crash_id.unwrap();
         let mut minidump_dest = dump_cache.join(&crash_id);
         minidump_dest.set_extension("dmp");
 
         // Download the minidump
         let minidump_req = reqwest::Client::new()
             .get("https://crash-stats.mozilla.org/api/RawCrash/")
-            .header("Auth-Token", *api_token)
+            .header("Auth-Token", api_token)
             .query(&[
                 ("crash_id", crash_id),
                 ("format", "raw"),
@@ -673,12 +670,14 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     let mut socc_json = None;
     let tmp_socc_json2: serde_json::Value;
 
-    if let Some(api_token) = &api_token {
-        // Download the json socorro has for the minidump
-        let socc_output_req = reqwest::Client::new()
-            .get("https://crash-stats.mozilla.org/api/ProcessedCrash/")
-            .header("Auth-Token", *api_token)
-            .query(&[("crash_id", crash_id)]);
+    if let Some(crash_id) = &crash_id {
+        // Download the json socorro has for the minidump. This can be done without an API token.
+        let mut request_builder =
+            reqwest::Client::new().get("https://crash-stats.mozilla.org/api/ProcessedCrash/");
+        if let Some(api_token) = &api_token {
+            request_builder = request_builder.header("Auth-Token", *api_token);
+        }
+        let socc_output_req = request_builder.query(&[("crash_id", crash_id)]);
         let mut tmp_socc_output = dump_cache.join(&crash_id);
         tmp_socc_output.set_extension("json");
 
@@ -700,8 +699,8 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
         let extra_json_req = reqwest::Client::new()
             .get("https://crash-stats.mozilla.org/api/RawCrash/")
             .header("Auth-Token", api_token.unwrap())
-            .query(&[("crash_id", crash_id)]);
-        let mut extra_json_path = dump_cache.join(&crash_id);
+            .query(&[("crash_id", crash_id_or_filename)]);
+        let mut extra_json_path = dump_cache.join(&crash_id_or_filename);
         extra_json_path.set_extension("evil.json");
 
         // Just need it on disk for rust-minidump, don't actually need the value here.
