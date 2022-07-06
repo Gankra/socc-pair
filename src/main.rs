@@ -937,28 +937,28 @@ See https://crash-stats.mozilla.org/api/tokens/ for details.\n\n\n",
     }
     let mut _static_file_server = None;
 
-    {
-        writeln!(
-            f,
-            "Setting up static file server (sfz) at {}",
-            mock_server_url
-        )?;
-
-        // We use the binary "sfz" to server our files.
-        let static_file_server_bin = install_bin(f, &install_tmp, "sfz", "=0.6.2")?;
-
-        // Now finally launch the server, and set up a guard that will
-        // kill it when this process exits.
-        let child = Command::new(static_file_server_bin)
-            .arg("--port")
-            .arg(mock_server_port)
-            .arg(&mock_server_cache)
-            .spawn()
-            .expect("could not spawn static file server");
-        _static_file_server = Some(ChildGuard { child });
-    }
-
     if mock_server {
+        {
+            writeln!(
+                f,
+                "Setting up static file server (sfz) at {}",
+                mock_server_url
+            )?;
+
+            // We use the binary "sfz" to server our files.
+            let static_file_server_bin = install_bin(f, &install_tmp, "sfz", "=0.6.2")?;
+
+            // Now finally launch the server, and set up a guard that will
+            // kill it when this process exits.
+            let child = Command::new(static_file_server_bin)
+                .arg("--port")
+                .arg(mock_server_port)
+                .arg(&mock_server_cache)
+                .spawn()
+                .expect("could not spawn static file server");
+            _static_file_server = Some(ChildGuard { child });
+        }
+
         writeln!(
             f,
             "\nrunning local minidump-stackwalk to populate mock-server's symbols...",
